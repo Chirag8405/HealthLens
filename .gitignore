@@ -1,0 +1,67 @@
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# -----------------------------
+# Node / Next.js
+# -----------------------------
+node_modules/
+.next/
+out/
+dist/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# -----------------------------
+# Environment / Secrets
+# -----------------------------
+.env
+.env.*
+!.env.example
+
+# -----------------------------
+# IDE / OS files
+# -----------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# -----------------------------
+# Build / runtime files
+# -----------------------------
+*.log
+*.sqlite3
+*.db
+
+# -----------------------------
+# Large datasets (do not commit)
+# -----------------------------
+/archive/
+/archive (2)/
+/chest_xray/
+/datasets/
+
+# Optional: ignore large dataset file formats globally
+*.zip
+*.tar
+*.gz
+*.7z
+*.h5
+*.hdf5
+*.parquet
