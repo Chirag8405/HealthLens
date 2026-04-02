@@ -1,4 +1,5 @@
 from .ann import train_and_evaluate_ann
+from .autoencoder import train_and_evaluate_autoencoder
 from .classification import train_and_evaluate_classification
 from .cnn import predict_cnn_image
 from .cnn import train_and_evaluate_cnn
@@ -12,6 +13,7 @@ __all__ = [
     "PreprocessingPipeline",
     "EDA",
     "train_and_evaluate_ann",
+    "train_and_evaluate_autoencoder",
     "train_and_evaluate_cnn",
     "predict_cnn_image",
     "prepare_modeling_dataframe",

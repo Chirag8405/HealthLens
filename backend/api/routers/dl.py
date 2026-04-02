@@ -11,6 +11,8 @@ from fastapi import Query
 from fastapi import UploadFile
 
 from ml.ann import train_and_evaluate_ann
+from ml.autoencoder import default_autoencoder_dataset_root
+from ml.autoencoder import train_and_evaluate_autoencoder
 from ml.cnn import default_cnn_dataset_root
 from ml.cnn import predict_cnn_image
 from ml.cnn import train_and_evaluate_cnn
@@ -22,6 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MODELS_DIR = PROJECT_ROOT / "models"
 ANN_RESULTS_PATH = MODELS_DIR / "ann_results.json"
 CNN_RESULTS_PATH = MODELS_DIR / "cnn_results.json"
+AUTOENCODER_RESULTS_PATH = MODELS_DIR / "autoencoder_results.json"
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
@@ -76,6 +79,22 @@ def get_cnn_results() -> dict[str, Any]:
         )
 
     return results
+
+
+@router.get("/autoencoder/results")
+def get_autoencoder_results(retrain: bool = Query(default=False)) -> dict[str, Any]:
+    if not retrain:
+        cached = _load_json(AUTOENCODER_RESULTS_PATH)
+        if cached is not None:
+            return cached
+
+    dataset_root = str(default_autoencoder_dataset_root())
+    try:
+        return train_and_evaluate_autoencoder(dataset_root=dataset_root, models_dir=MODELS_DIR)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Autoencoder training failed: {exc}") from exc
 
 
 @router.post("/cnn/predict")
