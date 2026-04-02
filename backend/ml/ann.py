@@ -2,26 +2,36 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import sys
 from io import BytesIO
-from pathlib import Path
 from typing import Any
 
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKEND_ROOT = os.path.dirname(CURRENT_DIR)
+if BACKEND_ROOT not in sys.path:
+    sys.path.insert(0, BACKEND_ROOT)
+
 import joblib
+from imblearn.over_sampling import SMOTE
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import tensorflow as tf
+from tensorflow.keras.regularizers import l2
 from sklearn.metrics import accuracy_score
+from sklearn.metrics import classification_report
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import f1_score
+from sklearn.metrics import precision_score
+from sklearn.metrics import recall_score
 from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_curve
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.utils.class_weight import compute_class_weight
 
-from ml.classification import train_and_evaluate_classification
 from ml.data_utils import default_csv_path
 from ml.data_utils import prepare_modeling_dataframe
 
@@ -31,14 +41,56 @@ def _to_base64_png() -> str:
     plt.tight_layout()
     plt.savefig(buffer, format="png")
     buffer.seek(0)
-    image_b64 = base64.b64encode(buffer.read()).decode("utf-8")
+    encoded = base64.b64encode(buffer.read()).decode("utf-8")
     buffer.close()
     plt.close()
-    return image_b64
+    return encoded
 
 
-def _default_models_dir() -> Path:
-    return Path(__file__).resolve().parents[2] / "models"
+def _default_models_dir() -> str:
+    project_root = os.path.dirname(BACKEND_ROOT)
+    return os.path.join(project_root, "models")
+
+
+def focal_loss(gamma: float = 2.5, alpha: float = 0.75):
+    def loss(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
+        y_true_cast = tf.cast(y_true, tf.float32)
+        y_pred_clipped = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
+        bce = (
+            -y_true_cast * tf.math.log(y_pred_clipped)
+            - (1.0 - y_true_cast) * tf.math.log(1.0 - y_pred_clipped)
+        )
+        p_t = y_true_cast * y_pred_clipped + (1.0 - y_true_cast) * (1.0 - y_pred_clipped)
+        focal = alpha * tf.pow(1.0 - p_t, gamma) * bce
+        return tf.reduce_mean(focal)
+
+    return loss
+
+
+def build_ann_model(input_dim: int) -> tf.keras.Model:
+    inputs = tf.keras.Input(shape=(input_dim,))
+    x = tf.keras.layers.Dense(128, activation="relu", kernel_regularizer=l2(0.001))(inputs)
+    x = tf.keras.layers.Dropout(0.4)(x)
+
+    x = tf.keras.layers.Dense(64, activation="relu", kernel_regularizer=l2(0.001))(x)
+    x = tf.keras.layers.Dropout(0.35)(x)
+
+    x = tf.keras.layers.Dense(32, activation="relu", kernel_regularizer=l2(0.001))(x)
+    x = tf.keras.layers.Dropout(0.25)(x)
+
+    outputs = tf.keras.layers.Dense(1, activation="sigmoid")(x)
+    model = tf.keras.Model(inputs=inputs, outputs=outputs)
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+        loss=focal_loss(gamma=2.5, alpha=0.75),
+        metrics=[
+            "accuracy",
+            tf.keras.metrics.AUC(name="auc"),
+            tf.keras.metrics.Recall(name="recall"),
+        ],
+    )
+    return model
 
 
 def _safe_auc(y_true: np.ndarray, y_prob: np.ndarray) -> float | None:
@@ -48,52 +100,24 @@ def _safe_auc(y_true: np.ndarray, y_prob: np.ndarray) -> float | None:
         return None
 
 
-def build_ann_model(input_dim: int) -> tf.keras.Model:
-    inputs = tf.keras.Input(shape=(input_dim,))
-
-    x = tf.keras.layers.Dense(256, activation="relu")(inputs)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dropout(0.3)(x)
-
-    x = tf.keras.layers.Dense(128, activation="relu")(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dropout(0.3)(x)
-
-    x = tf.keras.layers.Dense(64, activation="relu")(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
-
-    outputs = tf.keras.layers.Dense(1, activation="sigmoid")(x)
-    model = tf.keras.Model(inputs=inputs, outputs=outputs)
-
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-        loss="binary_crossentropy",
-        metrics=[
-            tf.keras.metrics.BinaryAccuracy(name="accuracy"),
-            tf.keras.metrics.AUC(name="auc"),
-        ],
-    )
-    return model
-
-
 def _training_curves_plot(history: tf.keras.callbacks.History) -> str:
-    history_dict = history.history
-    epochs = range(1, len(history_dict.get("loss", [])) + 1)
+    history_data = history.history
+    epochs = range(1, len(history_data.get("loss", [])) + 1)
 
     plt.figure(figsize=(12, 5))
 
     plt.subplot(1, 2, 1)
-    plt.plot(epochs, history_dict.get("loss", []), label="Train Loss", linewidth=2)
-    plt.plot(epochs, history_dict.get("val_loss", []), label="Val Loss", linewidth=2)
-    plt.title("ANN Training Loss")
+    plt.plot(epochs, history_data.get("loss", []), label="Train Loss", linewidth=2)
+    plt.plot(epochs, history_data.get("val_loss", []), label="Val Loss", linewidth=2)
+    plt.title("ANN Loss Curves")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.legend()
 
     plt.subplot(1, 2, 2)
-    plt.plot(epochs, history_dict.get("auc", []), label="Train AUC", linewidth=2)
-    plt.plot(epochs, history_dict.get("val_auc", []), label="Val AUC", linewidth=2)
-    plt.title("ANN Training AUC")
+    plt.plot(epochs, history_data.get("auc", []), label="Train AUC", linewidth=2)
+    plt.plot(epochs, history_data.get("val_auc", []), label="Val AUC", linewidth=2)
+    plt.title("ANN AUC Curves")
     plt.xlabel("Epoch")
     plt.ylabel("AUC")
     plt.legend()
@@ -102,7 +126,7 @@ def _training_curves_plot(history: tf.keras.callbacks.History) -> str:
 
 
 def _confusion_matrix_plot(cm: np.ndarray) -> str:
-    plt.figure(figsize=(10,6))
+    plt.figure(figsize=(10, 6))
     sns.heatmap(
         cm,
         annot=True,
@@ -117,104 +141,55 @@ def _confusion_matrix_plot(cm: np.ndarray) -> str:
     return _to_base64_png()
 
 
-def _best_classical_metrics(
-    csv_path: Path,
-    models_dir: Path,
-) -> tuple[str, dict[str, float | None]]:
-    classification_results_path = models_dir / "classification" / "results.json"
-
-    if classification_results_path.exists():
-        with classification_results_path.open("r", encoding="utf-8") as fp:
-            classification_results = json.load(fp)
-    else:
-        classification_results = train_and_evaluate_classification(
-            csv_path=csv_path,
-            models_dir=models_dir,
-        )
-
-    model_entries: dict[str, dict[str, Any]] = classification_results.get("models", {})
-    if not model_entries:
-        raise ValueError("No classical classification model results found.")
-
-    best_model_name = ""
-    best_model_payload: dict[str, Any] = {}
-    best_score = float("-inf")
-
-    for model_name, payload in model_entries.items():
-        metrics = payload.get("metrics", {})
-        score = float(metrics.get("f1_weighted", float("-inf")))
-        if score > best_score:
-            best_score = score
-            best_model_name = model_name
-            best_model_payload = payload
-
-    if not best_model_name:
-        raise ValueError("Unable to select best classical model.")
-
-    metrics = best_model_payload.get("metrics", {})
-    return best_model_name, {
-        "accuracy": float(metrics.get("accuracy", 0.0)),
-        "f1": float(metrics.get("f1_weighted", 0.0)),
-        "auc_roc": (
-            float(metrics["auc_roc"])
-            if metrics.get("auc_roc") is not None
-            else None
-        ),
-    }
-
-
-def _comparison_plot(
-    ann_metrics: dict[str, float | None],
-    classical_name: str,
-    classical_metrics: dict[str, float | None],
-) -> str:
-    labels = ["Accuracy", "F1", "AUC-ROC"]
-
-    ann_values = [
-        float(ann_metrics.get("accuracy") or 0.0),
-        float(ann_metrics.get("f1") or 0.0),
-        float(ann_metrics.get("auc_roc") or 0.0),
-    ]
-    classical_values = [
-        float(classical_metrics.get("accuracy") or 0.0),
-        float(classical_metrics.get("f1") or 0.0),
-        float(classical_metrics.get("auc_roc") or 0.0),
-    ]
-
-    x = np.arange(len(labels))
-    width = 0.34
-
-    plt.figure(figsize=(10,6))
-    plt.bar(x - width / 2, ann_values, width=width, label="ANN", color="#2563eb")
-    plt.bar(
-        x + width / 2,
-        classical_values,
-        width=width,
-        label=classical_name,
-        color="#0f766e",
-    )
-
-    plt.xticks(x, labels)
-    plt.ylim(0, 1.05)
-    plt.ylabel("Score")
-    plt.title("ANN vs Best Classical Model")
-    plt.legend()
-
+def _roc_curve_plot(y_true: np.ndarray, y_prob: np.ndarray, auc_value: float | None) -> str:
+    plt.figure(figsize=(10, 6))
+    fpr, tpr, _ = roc_curve(y_true, y_prob)
+    label = "ROC Curve"
+    if auc_value is not None:
+        label = f"ROC Curve (AUC={auc_value:.3f})"
+    plt.plot(fpr, tpr, linewidth=2, label=label)
+    plt.plot([0, 1], [0, 1], "k--", linewidth=1.5, label="Random")
+    plt.title("ANN ROC Curve")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.legend(loc="lower right")
     return _to_base64_png()
 
 
+def _save_threshold(models_dir: str, best_threshold: float) -> str:
+    threshold_path = os.path.join(models_dir, "ann_threshold.json")
+    with open(threshold_path, "w", encoding="utf-8") as fp:
+        json.dump({"best_threshold": float(best_threshold)}, fp, indent=2)
+    return threshold_path
+
+
+def load_ann_threshold(models_dir: str | None = None, default: float = 0.5) -> float:
+    resolved_models_dir = models_dir if models_dir is not None else _default_models_dir()
+    threshold_path = os.path.join(resolved_models_dir, "ann_threshold.json")
+    if not os.path.exists(threshold_path):
+        return float(default)
+
+    try:
+        with open(threshold_path, "r", encoding="utf-8") as fp:
+            payload = json.load(fp)
+        return float(payload.get("best_threshold", default))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return float(default)
+
+
 def train_and_evaluate_ann(
-    csv_path: str | Path | None = None,
-    models_dir: str | Path | None = None,
+    csv_path: str | os.PathLike[str] | None = None,
+    models_dir: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
-    csv_path = Path(csv_path) if csv_path is not None else default_csv_path()
-    models_dir = Path(models_dir) if models_dir is not None else _default_models_dir()
-    models_dir.mkdir(parents=True, exist_ok=True)
+    csv_path_resolved = str(csv_path) if csv_path is not None else str(default_csv_path())
+    models_dir_resolved = str(models_dir) if models_dir is not None else _default_models_dir()
+
+    os.makedirs(models_dir_resolved, exist_ok=True)
 
     np.random.seed(42)
     tf.keras.utils.set_random_seed(42)
 
-    df = prepare_modeling_dataframe(csv_path)
+    df = prepare_modeling_dataframe(csv_path_resolved)
     if "readmitted_30" not in df.columns:
         raise KeyError("Target column 'readmitted_30' not found after preprocessing.")
 
@@ -224,7 +199,7 @@ def train_and_evaluate_ann(
         if col in df.columns
     ]
 
-    X = df.drop(columns=drop_cols).astype(np.float32)
+    X = df.drop(columns=drop_cols).astype(np.float32).to_numpy()
     y = df["readmitted_30"].astype(int).to_numpy()
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -235,89 +210,133 @@ def train_and_evaluate_ann(
         stratify=y,
     )
 
+    sm = SMOTE(random_state=42, sampling_strategy=0.4)
+    X_train_res, y_train_res = sm.fit_resample(X_train, y_train)
+
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
+    X_train_res_scaled = scaler.fit_transform(X_train_res)
     X_test_scaled = scaler.transform(X_test)
-    joblib.dump(scaler, models_dir / "ann_scaler.pkl")
 
-    classes = np.unique(y_train)
-    class_weights = compute_class_weight(
-        class_weight="balanced",
-        classes=classes,
-        y=y_train,
-    )
-    class_weight = {int(cls): float(weight) for cls, weight in zip(classes, class_weights)}
+    scaler_path = os.path.join(models_dir_resolved, "ann_scaler.pkl")
+    joblib.dump(scaler, scaler_path)
 
-    ann_model = build_ann_model(input_dim=X_train_scaled.shape[1])
+    model = build_ann_model(input_dim=X_train_res_scaled.shape[1])
 
-    checkpoint_path = models_dir / "ann_best.h5"
+    checkpoint_path = os.path.join(models_dir_resolved, "ann_best.h5")
     callbacks = [
-        tf.keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True),
-        tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=5),
-        tf.keras.callbacks.ModelCheckpoint(str(checkpoint_path), save_best_only=True),
+        tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss",
+            patience=8,
+            restore_best_weights=True,
+            mode="min",
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=0.5,
+            patience=4,
+            mode="min",
+        ),
+        tf.keras.callbacks.ModelCheckpoint(
+            filepath=checkpoint_path,
+            monitor="val_loss",
+            save_best_only=True,
+            mode="min",
+        ),
     ]
 
-    history = ann_model.fit(
-        X_train_scaled,
-        y_train,
-        epochs=100,
-        batch_size=256,
+    history = model.fit(
+        X_train_res_scaled,
+        y_train_res,
+        epochs=50,
+        batch_size=512,
         validation_split=0.15,
-        class_weight=class_weight,
         callbacks=callbacks,
         verbose=0,
     )
 
-    ann_model_path = models_dir / "ann_model.h5"
-    ann_model.save(ann_model_path)
+    ann_model_path = os.path.join(models_dir_resolved, "ann_model.h5")
+    model.save(ann_model_path)
 
-    y_prob = ann_model.predict(X_test_scaled, verbose=0).ravel()
-    y_pred = (y_prob >= 0.5).astype(int)
+    y_pred_proba = model.predict(X_test_scaled, verbose=0).flatten()
 
-    accuracy = float(accuracy_score(y_test, y_pred))
-    f1 = float(f1_score(y_test, y_pred, zero_division=0))
-    auc_roc = _safe_auc(y_test, y_prob)
+    proba_flat = y_pred_proba.flatten()
+    print("Probability distribution:")
+    print(f"  Min:    {proba_flat.min():.4f}")
+    print(f"  Max:    {proba_flat.max():.4f}")
+    print(f"  Mean:   {proba_flat.mean():.4f}")
+    print(f"  Median: {np.median(proba_flat):.4f}")
+    print(f"  % above 0.5: {(proba_flat > 0.5).mean() * 100:.1f}%")
+    print(f"  % above 0.3: {(proba_flat > 0.3).mean() * 100:.1f}%")
+    print(f"  % above 0.2: {(proba_flat > 0.2).mean() * 100:.1f}%")
 
-    cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
+    thresholds = np.arange(0.25, 0.75, 0.01)
+    f1_scores = [
+        f1_score(y_test, (y_pred_proba > t).astype(int), zero_division=0)
+        for t in thresholds
+    ]
+    best_threshold = float(thresholds[int(np.argmax(f1_scores))]) if len(f1_scores) else 0.35
+    if best_threshold < 0.30:
+        print("WARNING: best_threshold below 0.30; model probabilities are compressed and may need retraining.")
 
-    training_curves_b64 = _training_curves_plot(history)
-    confusion_matrix_b64 = _confusion_matrix_plot(cm)
+    threshold_path = _save_threshold(models_dir_resolved, best_threshold)
 
-    best_classical_name, best_classical = _best_classical_metrics(
-        csv_path=csv_path,
-        models_dir=models_dir,
-    )
+    y_pred_final = (y_pred_proba > best_threshold).astype(int)
 
-    ann_metrics = {
-        "accuracy": accuracy,
-        "f1": f1,
-        "auc_roc": auc_roc,
+    recall_0 = float(recall_score(y_test, y_pred_final, pos_label=0, zero_division=0))
+    recall_1 = float(recall_score(y_test, y_pred_final, pos_label=1, zero_division=0))
+    if recall_0 < 0.50 or recall_1 < 0.40:
+        print("WARNING: Model is still imbalanced after threshold tuning.")
+        print(f"Recall class 0: {recall_0:.3f}, Recall class 1: {recall_1:.3f}")
+        print("Consider retraining with different hyperparameters.")
+
+    metrics = {
+        "accuracy": float(accuracy_score(y_test, y_pred_final)),
+        "f1": float(f1_score(y_test, y_pred_final, zero_division=0)),
+        "auc_roc": _safe_auc(y_test, y_pred_proba),
+        "recall": float(recall_score(y_test, y_pred_final, zero_division=0)),
+        "precision": float(precision_score(y_test, y_pred_final, zero_division=0)),
+        "recall_class_0": recall_0,
+        "recall_class_1": recall_1,
+        "best_threshold": best_threshold,
     }
-    comparison_plot_b64 = _comparison_plot(
-        ann_metrics=ann_metrics,
-        classical_name=best_classical_name,
-        classical_metrics=best_classical,
-    )
+
+    report_text = classification_report(y_test, y_pred_final, zero_division=0)
+    print("ANN Classification Report")
+    print(report_text)
+    print("ANN Metrics")
+    print(json.dumps(metrics, indent=2))
+
+    cm = confusion_matrix(y_test, y_pred_final, labels=[0, 1])
+    training_curves_plot = _training_curves_plot(history)
+    confusion_matrix_plot = _confusion_matrix_plot(cm)
+    roc_curve_plot = _roc_curve_plot(y_test, y_pred_proba, metrics["auc_roc"])
 
     results: dict[str, Any] = {
         "task": "ann_classification",
         "target": "readmitted_30",
         "train_shape": [int(X_train.shape[0]), int(X_train.shape[1])],
+        "train_resampled_shape": [int(X_train_res.shape[0]), int(X_train_res.shape[1])],
         "test_shape": [int(X_test.shape[0]), int(X_test.shape[1])],
-        "class_weight": class_weight,
-        "metrics": ann_metrics,
-        "training_curves_plot": training_curves_b64,
-        "confusion_matrix_plot": confusion_matrix_b64,
-        "comparison_plot": comparison_plot_b64,
-        "best_classical_model": {
-            "model_name": best_classical_name,
-            "metrics": best_classical,
-        },
-        "model_path": str(ann_model_path),
-        "best_checkpoint_path": str(checkpoint_path),
+        "class_weight": None,
+        "metrics": metrics,
+        "classification_report": report_text,
+        "training_curves_plot": training_curves_plot,
+        "confusion_matrix_plot": confusion_matrix_plot,
+        "roc_curve_plot": roc_curve_plot,
+        "model_path": ann_model_path,
+        "best_checkpoint_path": checkpoint_path,
+        "scaler_path": scaler_path,
+        "threshold_path": threshold_path,
     }
 
-    with (models_dir / "ann_results.json").open("w", encoding="utf-8") as fp:
+    results_path = os.path.join(models_dir_resolved, "ann_results.json")
+    with open(results_path, "w", encoding="utf-8") as fp:
         json.dump(results, fp)
 
     return results
+
+
+if __name__ == "__main__":
+    output = train_and_evaluate_ann()
+    print(json.dumps(output.get("metrics", {}), indent=2))
+    print("model_path:", output.get("model_path"))

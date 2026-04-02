@@ -125,6 +125,58 @@ def impute_missing_values(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def engineer_clinical_features(df: pd.DataFrame) -> pd.DataFrame:
+    for col in ("number_inpatient", "number_outpatient", "number_emergency", "number_diagnoses"):
+        if col not in df.columns:
+            df[col] = 0
+
+    inpatient = pd.to_numeric(df["number_inpatient"], errors="coerce").fillna(0.0)
+    outpatient = pd.to_numeric(df["number_outpatient"], errors="coerce").fillna(0.0)
+    emergency = pd.to_numeric(df["number_emergency"], errors="coerce").fillna(0.0)
+    diagnoses = pd.to_numeric(df["number_diagnoses"], errors="coerce").fillna(0.0)
+
+    total_prior_visits = inpatient + outpatient + emergency
+    df["total_prior_visits"] = total_prior_visits
+    df["inpatient_ratio"] = inpatient / (total_prior_visits + 1.0)
+    df["high_utilizer"] = (inpatient >= 2).astype(int)
+    df["any_emergency"] = (emergency > 0).astype(int)
+
+    discharge_code = pd.Series(0.0, index=df.index)
+    if "discharge_disposition_id" in df.columns:
+        discharge_code = pd.to_numeric(df["discharge_disposition_id"], errors="coerce").fillna(0.0)
+    elif "discharge_disposition" in df.columns:
+        discharge_code = pd.to_numeric(df["discharge_disposition"], errors="coerce").fillna(0.0)
+    else:
+        disp_cols = [c for c in df.columns if c.startswith("discharge_disposition_")]
+        for col in disp_cols:
+            suffix = col.split("_")[-1]
+            if suffix.isdigit():
+                code = int(suffix)
+                discharge_code = discharge_code.where(df[col] != 1, float(code))
+
+    high_risk_disp = {3, 5, 14, 22, 23, 24, 27, 28, 29, 30}
+    mod_risk_disp = {2, 15, 16, 17}
+    low_risk_disp = {1, 6, 8}
+
+    discharge_code_int = discharge_code.astype(int)
+    df["discharge_high_risk"] = discharge_code_int.isin(high_risk_disp).astype(int)
+    df["discharge_mod_risk"] = discharge_code_int.isin(mod_risk_disp).astype(int)
+    df["discharge_low_risk"] = discharge_code_int.isin(low_risk_disp).astype(int)
+
+    df["diagnosis_burden"] = diagnoses * inpatient
+    df["high_diagnosis_burden"] = (diagnoses >= 7).astype(int)
+
+    df["readmission_risk_score"] = (
+        inpatient * 2.0
+        + emergency * 1.5
+        + df["discharge_high_risk"] * 3.0
+        + df["high_diagnosis_burden"] * 1.5
+        + diagnoses * 0.3
+    )
+
+    return df
+
+
 def prepare_modeling_dataframe(csv_path: str | Path) -> pd.DataFrame:
     csv_path = Path(csv_path)
     if not csv_path.exists():
@@ -177,6 +229,8 @@ def prepare_modeling_dataframe(csv_path: str | Path) -> pd.DataFrame:
         if col in df.columns:
             encoder = LabelEncoder()
             df[col] = encoder.fit_transform(df[col].astype(str))
+
+    df = engineer_clinical_features(df)
 
     one_hot_columns: list[str] = []
     for normalized_col, source_col in ONE_HOT_COLUMN_MAP.items():

@@ -49,6 +49,9 @@ Thumbs.db
 *.sqlite3
 *.db
 
+# Trained model artifacts
+/models/
+
 # -----------------------------
 # Large datasets (do not commit)
 # -----------------------------
