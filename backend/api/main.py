@@ -19,7 +19,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(eda.router, prefix="/eda", tags=["EDA"])
+app.include_router(eda.router, tags=["EDA"])
 app.include_router(ml.router, prefix="/ml", tags=["ML"])
 app.include_router(dl.router, prefix="/dl", tags=["DL"])
 app.include_router(predict.router, prefix="/predict", tags=["Predict"])
