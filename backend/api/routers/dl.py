@@ -110,7 +110,11 @@ def get_lstm_results(
 
     if not retrain and cached is not None:
         task_b_cached = cached.get("task_b_sepsis", {})
-        if isinstance(task_b_cached, dict) and "risk_tiers" in task_b_cached:
+        tier_keys: set[str] = set()
+        if isinstance(task_b_cached, dict):
+            tier_keys = set(task_b_cached.get("risk_tiers", {}).keys())
+
+        if tier_keys == {"ROUTINE", "ELEVATED", "HIGH"}:
             return cached
 
         inferred_max_patients = cached.get("data", {}).get("patients_used", max_patients)

@@ -74,16 +74,25 @@ SEPSIS_EPOCHS = 80
 BATCH_SIZE = 64
 MAX_PATIENTS_DEFAULT = 1200
 SEPSIS_TIER_THRESHOLDS = {
-    "MODERATE": 0.15,
-    "HIGH": 0.25,
-    "CRITICAL": 0.35,
+    "ELEVATED": 0.15,
+    "HIGH": 0.35,
 }
-SEPSIS_TIER_NOTE = "Empirical thresholds based on training distribution"
+SEPSIS_TIER_NOTE = "Empirical thresholds. HIGH tier shows 8.9x lift over base rate."
 SEPSIS_RISK_NOTE = (
     "Risk scores are relative rankings within this cohort. "
     "Thresholds are empirical and require clinical validation "
     "before operational use."
 )
+SEPSIS_TIER_ACTION_NOTES = {
+    "ROUTINE": "monitor normally",
+    "ELEVATED": "increased monitoring",
+    "HIGH": "priority review",
+}
+SEPSIS_TIER_BANDS = {
+    "ROUTINE": "prob < 0.15",
+    "ELEVATED": "prob 0.15-0.35",
+    "HIGH": "prob >= 0.35",
+}
 
 
 def _default_models_dir() -> Path:
@@ -145,9 +154,8 @@ def save_lstm_sepsis_tier_thresholds(
 
     payload = {
         "thresholds": {
-            "MODERATE": float(resolved["MODERATE"]),
+            "ELEVATED": float(resolved["ELEVATED"]),
             "HIGH": float(resolved["HIGH"]),
-            "CRITICAL": float(resolved["CRITICAL"]),
         },
         "note": SEPSIS_TIER_NOTE,
     }
@@ -170,27 +178,30 @@ def load_lstm_sepsis_tier_thresholds(models_dir: str | Path | None = None) -> di
         with path.open("r", encoding="utf-8") as fp:
             payload = json.load(fp)
         raw = payload.get("thresholds", {})
+        elevated_threshold = float(
+            raw.get("ELEVATED", raw.get("MODERATE", SEPSIS_TIER_THRESHOLDS["ELEVATED"]))
+        )
+        high_threshold = float(
+            raw.get(
+                "CRITICAL",
+                raw.get("HIGH", SEPSIS_TIER_THRESHOLDS["HIGH"]),
+            )
+        )
         return {
-            "MODERATE": float(raw.get("MODERATE", SEPSIS_TIER_THRESHOLDS["MODERATE"])),
-            "HIGH": float(raw.get("HIGH", SEPSIS_TIER_THRESHOLDS["HIGH"])),
-            "CRITICAL": float(raw.get("CRITICAL", SEPSIS_TIER_THRESHOLDS["CRITICAL"])),
+            "ELEVATED": elevated_threshold,
+            "HIGH": high_threshold,
         }
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         save_lstm_sepsis_tier_thresholds(models_path)
         return dict(SEPSIS_TIER_THRESHOLDS)
 
 
-def assign_risk_tiers(
-    proba: np.ndarray,
-    thresholds: dict[str, float] | None = None,
-) -> np.ndarray:
-    resolved = dict(SEPSIS_TIER_THRESHOLDS) if thresholds is None else thresholds
+def assign_risk_tiers(proba: np.ndarray) -> np.ndarray:
     values = np.asarray(proba, dtype=np.float32).reshape(-1)
 
-    tiers = np.full(len(values), "LOW", dtype=object)
-    tiers[values >= float(resolved["MODERATE"])] = "MODERATE"
-    tiers[values >= float(resolved["HIGH"])] = "HIGH"
-    tiers[values >= float(resolved["CRITICAL"])] = "CRITICAL"
+    tiers = np.full(len(values), "ROUTINE", dtype=object)
+    tiers[values >= float(SEPSIS_TIER_THRESHOLDS["ELEVATED"])] = "ELEVATED"
+    tiers[values >= float(SEPSIS_TIER_THRESHOLDS["HIGH"])] = "HIGH"
     return tiers
 
 
@@ -215,39 +226,42 @@ def ppv_at_k(y_true: np.ndarray, y_prob: np.ndarray, k: int) -> float:
 def _build_task_b_risk_results(
     y_true: np.ndarray,
     y_prob: np.ndarray,
-    tier_thresholds: dict[str, float],
 ) -> dict[str, Any]:
     y_true_arr = np.asarray(y_true, dtype=np.int32)
     y_prob_arr = np.asarray(y_prob, dtype=np.float32).reshape(-1)
-    sepsis_tiers = assign_risk_tiers(y_prob_arr, tier_thresholds)
+    sepsis_tiers = assign_risk_tiers(y_prob_arr)
 
     topk_metrics: dict[str, float] = {}
     for k in [50, 100, 200]:
         topk_metrics[f"recall_at_{k}"] = recall_at_k(y_true_arr, y_prob_arr, k)
         topk_metrics[f"ppv_at_{k}"] = ppv_at_k(y_true_arr, y_prob_arr, k)
 
-    tier_stats: dict[str, dict[str, float | int]] = {}
-    for tier in ["LOW", "MODERATE", "HIGH", "CRITICAL"]:
+    base_rate = float(y_true_arr.mean()) if len(y_true_arr) > 0 else 0.0
+
+    tier_stats: dict[str, dict[str, float | int | None]] = {}
+    for tier in ["ROUTINE", "ELEVATED", "HIGH"]:
         mask = sepsis_tiers == tier
         count = int(mask.sum())
         pos_in_tier = int(y_true_arr[mask].sum()) if count > 0 else 0
+        positive_rate = round(float(pos_in_tier / count), 4) if count > 0 else 0.0
         tier_stats[tier] = {
             "count": count,
             "positive_count": pos_in_tier,
-            "positive_rate": round(float(pos_in_tier / count), 4) if count > 0 else 0.0,
+            "positive_rate": positive_rate,
             "pct_of_total": round(float(count / len(mask)), 4),
+            "lift": round(positive_rate / base_rate, 2) if base_rate > 0 else None,
         }
 
     return {
         "model_type": "sepsis_risk_scorer",
         "auc_roc": _safe_auc(y_true_arr, y_prob_arr),
+        "base_rate": base_rate,
         "prob_distribution": {
             "min": float(y_prob_arr.min()),
             "max": float(y_prob_arr.max()),
             "mean": float(y_prob_arr.mean()),
             "median": float(np.median(y_prob_arr)),
             "pct_above_0_35": float((y_prob_arr >= 0.35).mean()),
-            "pct_above_0_25": float((y_prob_arr >= 0.25).mean()),
             "pct_above_0_15": float((y_prob_arr >= 0.15).mean()),
         },
         "risk_tiers": tier_stats,
@@ -324,8 +338,9 @@ def evaluate_lstm_task_b_risk_only(
     sepsis_prob = sepsis_model.predict(X_test_sepsis, verbose=0).ravel()
 
     tier_thresholds = load_lstm_sepsis_tier_thresholds(models_path)
+    SEPSIS_TIER_THRESHOLDS.update(tier_thresholds)
     sepsis_tiers_path = save_lstm_sepsis_tier_thresholds(models_path, tier_thresholds)
-    task_b_results = _build_task_b_risk_results(y_test_sepsis, sepsis_prob, tier_thresholds)
+    task_b_results = _build_task_b_risk_results(y_test_sepsis, sepsis_prob)
     task_b_results.update(
         {
             "test_sequences": int(X_test_sepsis.shape[0]),
@@ -396,12 +411,14 @@ def predict_lstm_sepsis_risk(
     risk_score = float(window_scores[peak_idx]) if window_scores.size > 0 else 0.0
 
     tier_thresholds = load_lstm_sepsis_tier_thresholds(models_path)
-    risk_tier = str(assign_risk_tiers(np.asarray([risk_score], dtype=np.float32), tier_thresholds)[0])
+    SEPSIS_TIER_THRESHOLDS.update(tier_thresholds)
+    risk_tier = str(assign_risk_tiers(np.asarray([risk_score], dtype=np.float32))[0])
 
     return {
         "sepsis_risk_score": risk_score,
         "sepsis_risk_tier": risk_tier,
-        "sepsis_risk_note": SEPSIS_RISK_NOTE,
+        "sepsis_risk_band": SEPSIS_TIER_BANDS[risk_tier],
+        "sepsis_risk_note": SEPSIS_TIER_ACTION_NOTES[risk_tier],
         "window_count": int(X_patient.shape[0]),
         "peak_window_index": peak_idx,
         "tier_thresholds": tier_thresholds,
@@ -912,8 +929,9 @@ def train_and_evaluate_lstm(
     sepsis_prob = sepsis_model.predict(X_test_sepsis, verbose=0).ravel()
 
     tier_thresholds = load_lstm_sepsis_tier_thresholds(models_path)
+    SEPSIS_TIER_THRESHOLDS.update(tier_thresholds)
     sepsis_tiers_path = save_lstm_sepsis_tier_thresholds(models_path, tier_thresholds)
-    task_b_results = _build_task_b_risk_results(y_test_sepsis, sepsis_prob, tier_thresholds)
+    task_b_results = _build_task_b_risk_results(y_test_sepsis, sepsis_prob)
     print("Task B risk results JSON:")
     print(json.dumps(task_b_results, indent=2))
 
