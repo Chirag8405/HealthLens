@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import gc
 import json
 from pathlib import Path
 from typing import Any
 
+import tensorflow as tf
 from fastapi import APIRouter
 from fastapi import File
 from fastapi import HTTPException
@@ -20,6 +22,7 @@ from ml.data_utils import default_csv_path
 from ml.lstm import evaluate_lstm_task_b_risk_only
 from ml.lstm import predict_lstm_sepsis_risk
 from ml.lstm import train_and_evaluate_lstm
+from ml.model_registry import unload_heavy_models
 
 router = APIRouter()
 
@@ -174,7 +177,11 @@ async def predict_lstm(file: UploadFile = File(...)) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     try:
-        return predict_lstm_sepsis_risk(patient_psv_bytes=payload, models_dir=MODELS_DIR)
+        result = predict_lstm_sepsis_risk(patient_psv_bytes=payload, models_dir=MODELS_DIR)
+        unload_heavy_models()
+        gc.collect()
+        tf.keras.backend.clear_session()
+        return result
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -193,7 +200,11 @@ async def predict_cnn(file: UploadFile = File(...)) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     try:
-        return predict_cnn_image(image_bytes=image_bytes, models_dir=MODELS_DIR)
+        result = predict_cnn_image(image_bytes=image_bytes, models_dir=MODELS_DIR)
+        unload_heavy_models()
+        gc.collect()
+        tf.keras.backend.clear_session()
+        return result
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:

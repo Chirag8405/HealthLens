@@ -11,3 +11,4 @@ Pillow==10.3.0
 python-multipart==0.0.9
 joblib==1.4.2
 shap==0.45.0
+psutil==5.9.8

@@ -1,7 +1,24 @@
+import os
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+import tensorflow as tf
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import dl, eda, ml, predict
+from api.routers import dl, eda, health, ml, predict
+
+gpus = tf.config.experimental.list_physical_devices("GPU")
+if gpus:
+    for gpu in gpus:
+        try:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError:
+            # Safe fallback when GPU runtime has already been initialized.
+            pass
+else:
+    tf.config.threading.set_inter_op_parallelism_threads(2)
+    tf.config.threading.set_intra_op_parallelism_threads(2)
 
 app = FastAPI(
     title="Intelligent Healthcare Data Analytics API",
@@ -19,12 +36,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def startup() -> None:
+    print("HealthLens API started. Models load on first request.")
+
+
+app.include_router(health.router, tags=["Health"])
 app.include_router(eda.router, tags=["EDA"])
 app.include_router(ml.router, prefix="/ml", tags=["ML"])
 app.include_router(dl.router, prefix="/dl", tags=["DL"])
 app.include_router(predict.router, prefix="/predict", tags=["Predict"])
-
-
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}

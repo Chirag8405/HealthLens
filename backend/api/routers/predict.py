@@ -1,24 +1,18 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
-import joblib
 import numpy as np
 from fastapi import APIRouter
 from fastapi import HTTPException
 from pydantic import BaseModel
 from pydantic import Field
 
-from ml.ann import load_ann_threshold
+from ml.model_registry import get_model
 
 router = APIRouter()
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-MODELS_DIR = PROJECT_ROOT / "models"
 
 
 class FullPredictionRequest(BaseModel):
@@ -354,31 +348,7 @@ def _top_risk_factors(
 
 
 @lru_cache(maxsize=1)
-def _load_tabular_artifacts(models_dir_str: str) -> TabularArtifacts:
-	models_dir = Path(models_dir_str)
-	classification_dir = models_dir / "classification"
-
-	feature_names_path = classification_dir / "feature_names.json"
-	classification_selector_path = classification_dir / "variance_selector.pkl"
-	classification_scaler_path = classification_dir / "scaler.pkl"
-	random_forest_path = classification_dir / "randomforestclassifier.joblib"
-	ann_scaler_path = models_dir / "ann_scaler.pkl"
-	ann_model_path = models_dir / "ann_model.h5"
-
-	required_files = {
-		"feature_names": feature_names_path,
-		"classification_scaler": classification_scaler_path,
-		"random_forest_model": random_forest_path,
-		"ann_scaler": ann_scaler_path,
-		"ann_model": ann_model_path,
-	}
-
-	for label, path in required_files.items():
-		if not path.exists():
-			raise FileNotFoundError(
-				f"Missing artifact '{label}' at {path}. Train models first via /ml/train and /dl/ann."
-			)
-
+def _load_shap_explainer() -> Any:
 	try:
 		import shap
 	except Exception as exc:
@@ -386,22 +356,20 @@ def _load_tabular_artifacts(models_dir_str: str) -> TabularArtifacts:
 			"SHAP is required for /predict/full. Install dependency 'shap==0.45.0'."
 		) from exc
 
-	try:
-		import tensorflow as tf
-	except Exception as exc:
-		raise ImportError(
-			"TensorFlow is required for ANN inference. Install backend requirements first."
-		) from exc
+	random_forest_model = get_model("rf")
+	return shap.TreeExplainer(random_forest_model)
 
-	with feature_names_path.open("r", encoding="utf-8") as fp:
-		feature_names = list(json.load(fp))
 
+def _load_tabular_artifacts() -> TabularArtifacts:
+	feature_names = list(get_model("feature_names"))
 	feature_index = {name: idx for idx, name in enumerate(feature_names)}
 	feature_index_lower = {name.lower(): idx for idx, name in enumerate(feature_names)}
 
 	classification_selector = None
-	if classification_selector_path.exists():
-		classification_selector = joblib.load(classification_selector_path)
+	try:
+		classification_selector = get_model("classification_selector")
+	except FileNotFoundError:
+		classification_selector = None
 
 	rf_feature_names = feature_names
 	if classification_selector is not None and hasattr(classification_selector, "get_support"):
@@ -409,14 +377,17 @@ def _load_tabular_artifacts(models_dir_str: str) -> TabularArtifacts:
 		if len(support) == len(feature_names):
 			rf_feature_names = [name for name, keep in zip(feature_names, support) if keep]
 
-	classification_scaler = joblib.load(classification_scaler_path)
-	ann_scaler = joblib.load(ann_scaler_path)
+	classification_scaler = get_model("classification_scaler")
+	ann_scaler = get_model("ann_scaler")
 	ann_expected_features = int(getattr(ann_scaler, "n_features_in_", len(feature_names)))
-	random_forest_model = joblib.load(random_forest_path)
-	ann_model = tf.keras.models.load_model(ann_model_path, compile=False)
-	ann_threshold = float(load_ann_threshold(str(models_dir), default=0.4))
+	random_forest_model = get_model("rf")
+	ann_model = get_model("ann")
 
-	shap_explainer = shap.TreeExplainer(random_forest_model)
+	threshold_payload = get_model("threshold")
+	if isinstance(threshold_payload, dict):
+		ann_threshold = float(threshold_payload.get("best_threshold", 0.4))
+	else:
+		ann_threshold = float(threshold_payload)
 
 	return TabularArtifacts(
 		feature_names=feature_names,
@@ -430,13 +401,11 @@ def _load_tabular_artifacts(models_dir_str: str) -> TabularArtifacts:
 		random_forest_model=random_forest_model,
 		ann_model=ann_model,
 		ann_threshold=ann_threshold,
-		shap_explainer=shap_explainer,
+		shap_explainer=_load_shap_explainer(),
 	)
 
 
-def _predict_full_internal(request: FullPredictionRequest) -> dict[str, Any]:
-	artifacts = _load_tabular_artifacts(str(MODELS_DIR.resolve()))
-
+def _predict_full_internal(request: FullPredictionRequest, artifacts: TabularArtifacts) -> dict[str, Any]:
 	raw_vector = _build_feature_vector(request, artifacts)
 	raw_2d = raw_vector.reshape(1, -1)
 
@@ -479,10 +448,17 @@ def _predict_full_internal(request: FullPredictionRequest) -> dict[str, Any]:
 @router.post("/full")
 def predict_full(request: FullPredictionRequest) -> dict[str, Any]:
 	try:
-		return _predict_full_internal(request)
+		artifacts = _load_tabular_artifacts()
 	except FileNotFoundError as exc:
 		raise HTTPException(status_code=404, detail=str(exc)) from exc
-	except (ImportError, ValueError) as exc:
+	except ImportError as exc:
+		raise HTTPException(status_code=400, detail=str(exc)) from exc
+	except Exception as exc:
+		raise HTTPException(status_code=503, detail=f"Model unavailable: {str(exc)}") from exc
+
+	try:
+		return _predict_full_internal(request, artifacts)
+	except ValueError as exc:
 		raise HTTPException(status_code=400, detail=str(exc)) from exc
 	except Exception as exc:
 		raise HTTPException(status_code=500, detail=f"/predict/full inference failed: {exc}") from exc
