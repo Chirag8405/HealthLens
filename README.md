@@ -70,10 +70,13 @@ chest_xray/
 
 ## 2) Backend Setup
 
+Use Python 3.11 for the backend virtual environment. The pinned scientific stack in `requirements.txt` is validated on 3.11 and can fail to build on 3.14 (for example, pandas source-build errors).
+
 ```bash
 cd backend
-python -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
+python --version
 pip install -r requirements.txt
 ```
 
