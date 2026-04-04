@@ -150,6 +150,30 @@ export interface CnnResultsResponse {
 export interface CnnPredictResponse {
   label: string;
   confidence: number;
+  gradcam_b64?: string;
+}
+
+export interface LstmForecastPoint {
+  hour: number;
+  hr_actual: number;
+  hr_predicted: number;
+  spo2_actual: number;
+  spo2_predicted: number;
+}
+
+export interface LstmForecastSummary {
+  hr_trend: string;
+  spo2_trend: string;
+  hr_final_predicted: number;
+  spo2_final_predicted: number;
+}
+
+export interface LstmPredictResponse {
+  sepsis_risk: number;
+  risk_tier: string;
+  risk_label?: string;
+  forecast: LstmForecastPoint[];
+  summary?: LstmForecastSummary;
 }
 
 export interface AutoencoderResultsResponse {

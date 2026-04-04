@@ -1,13 +1,13 @@
 "use client";
 
-import { DragEvent, FormEvent, useMemo, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { DragEvent, FormEvent, useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 
 import ErrorBanner from "@/components/ErrorBanner";
 import LoadingSpinner from "@/components/LoadingSpinner";
 import XrayViewer from "@/components/XrayViewer";
-import { fetchAPI, uploadFile } from "@/lib/api";
-import type { CnnPredictResponse, CnnResultsResponse } from "@/lib/types";
+import { uploadFile } from "@/lib/api";
+import type { CnnPredictResponse } from "@/lib/types";
 
 function isSupportedImage(file: File): boolean {
   const type = file.type.toLowerCase();
@@ -27,11 +27,6 @@ export default function ClinicalXrayPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [fileError, setFileError] = useState<string>("");
-
-  const cnnResultsQuery = useQuery({
-    queryKey: ["clinical-cnn-results"],
-    queryFn: () => fetchAPI<CnnResultsResponse>("/dl/cnn/results"),
-  });
 
   const predictMutation = useMutation({
     mutationFn: (file: File) => uploadFile<CnnPredictResponse>("/dl/cnn/predict", file),
@@ -67,10 +62,6 @@ export default function ClinicalXrayPage() {
   };
 
   const label = predictMutation.data?.label;
-
-  const gradcamImage = useMemo(() => {
-    return cnnResultsQuery.data?.gradcam_plot ?? null;
-  }, [cnnResultsQuery.data?.gradcam_plot]);
 
   return (
     <section className="space-y-7">
@@ -127,7 +118,7 @@ export default function ClinicalXrayPage() {
         <section className="space-y-4 rounded-2xl border border-emerald-200 bg-white p-6 shadow-sm">
           <XrayViewer
             original_b64={previewUrl}
-            gradcam_b64={gradcamImage}
+            gradcam_b64={predictMutation.data?.gradcam_b64}
             label={label}
             confidence={predictMutation.data?.confidence}
             showConfidence={false}

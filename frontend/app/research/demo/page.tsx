@@ -20,7 +20,7 @@ import LoadingSpinner from "@/components/LoadingSpinner";
 import RiskBanner from "@/components/RiskBanner";
 import XrayViewer from "@/components/XrayViewer";
 import { fetchAPI, postJSON, uploadFile } from "@/lib/api";
-import type { AnnResultsResponse, ClusteringResultsResponse, CnnPredictResponse, CnnResultsResponse } from "@/lib/types";
+import type { AnnResultsResponse, CnnPredictResponse } from "@/lib/types";
 
 type FullPredictionResponse = {
   readmission_risk_30day?: number;
@@ -29,6 +29,17 @@ type FullPredictionResponse = {
   ann_confidence?: number;
   rf_confidence?: number;
   recommendation?: string;
+  patient_cluster?: number;
+  pca_position?: {
+    x: number;
+    y: number;
+  };
+  cluster_centers?: Array<{
+    cluster: number;
+    x: number;
+    y: number;
+    size: number;
+  }>;
   [key: string]: unknown;
 };
 
@@ -107,16 +118,6 @@ export default function ResearchDemoPage() {
     queryFn: () => fetchAPI<AnnResultsResponse>("/dl/ann"),
   });
 
-  const clustersQuery = useQuery({
-    queryKey: ["research-demo-clusters"],
-    queryFn: () => fetchAPI<ClusteringResultsResponse>("/ml/clusters"),
-  });
-
-  const cnnResultsQuery = useQuery({
-    queryKey: ["research-demo-cnn"],
-    queryFn: () => fetchAPI<CnnResultsResponse>("/dl/cnn/results"),
-  });
-
   const predictionMutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) =>
       postJSON<FullPredictionResponse, Record<string, unknown>>("/predict/full", payload),
@@ -193,43 +194,37 @@ export default function ResearchDemoPage() {
   }, [predictionMutation.data?.top_risk_factors]);
 
   const assignedCluster = useMemo(() => {
-    const signal = form.number_inpatient + form.number_emergency + form.number_diagnoses;
-    return (signal % 4) + 1;
-  }, [form.number_diagnoses, form.number_emergency, form.number_inpatient]);
+    return predictionMutation.data?.patient_cluster ?? null;
+  }, [predictionMutation.data?.patient_cluster]);
 
   const similarCount = useMemo(() => {
-    const labels = clustersQuery.data?.kmeans?.cluster_labels ?? [];
-    return labels.filter((label) => label === assignedCluster - 1).length;
-  }, [assignedCluster, clustersQuery.data?.kmeans?.cluster_labels]);
-
-  const clusterScatterData = useMemo(() => {
-    const points: Array<{ x: number; y: number; cluster: string }> = [];
-    const centers = [
-      { x: -2.3, y: 1.2 },
-      { x: 0.3, y: 0.5 },
-      { x: 2.0, y: -0.8 },
-      { x: 1.1, y: 2.1 },
-    ];
-
-    for (let clusterIdx = 0; clusterIdx < centers.length; clusterIdx += 1) {
-      for (let i = 0; i < 20; i += 1) {
-        points.push({
-          x: Number((centers[clusterIdx].x + Math.sin(i + clusterIdx) * 0.4).toFixed(2)),
-          y: Number((centers[clusterIdx].y + Math.cos(i * 1.4 + clusterIdx) * 0.4).toFixed(2)),
-          cluster: `Cluster ${clusterIdx + 1}`,
-        });
-      }
+    if (assignedCluster === null) {
+      return null;
     }
 
-    return points;
-  }, []);
+    const clusterCenters = predictionMutation.data?.cluster_centers ?? [];
+    const matched = clusterCenters.find((center) => center.cluster === assignedCluster);
+    return matched?.size ?? null;
+  }, [assignedCluster, predictionMutation.data?.cluster_centers]);
+
+  const clusterScatterData = useMemo(() => {
+    const centers = predictionMutation.data?.cluster_centers ?? [];
+    return centers.map((center) => ({
+      x: center.x,
+      y: center.y,
+      cluster: `Cluster ${center.cluster}`,
+      size: center.size,
+    }));
+  }, [predictionMutation.data?.cluster_centers]);
 
   const patientPoint = useMemo(() => {
-    return {
-      x: Number((((form.age - 55) / 12) + form.number_inpatient * 0.3).toFixed(2)),
-      y: Number((((form.num_medications - 10) / 6) + form.number_diagnoses * 0.2).toFixed(2)),
-    };
-  }, [form.age, form.num_medications, form.number_diagnoses, form.number_inpatient]);
+    const pcaPosition = predictionMutation.data?.pca_position;
+    if (!pcaPosition) {
+      return [];
+    }
+
+    return [{ x: pcaPosition.x, y: pcaPosition.y }];
+  }, [predictionMutation.data?.pca_position]);
 
   return (
     <section className="space-y-7">
@@ -420,7 +415,7 @@ export default function ResearchDemoPage() {
 
               <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
                 <p className="text-sm font-semibold text-slate-800">
-                  Cluster assignment: Cluster {assignedCluster} | Similar patients: {similarCount.toLocaleString()}
+                  Cluster assignment: {assignedCluster !== null ? `Cluster ${assignedCluster}` : "Unavailable"} | Similar patients: {similarCount !== null ? similarCount.toLocaleString() : "--"}
                 </p>
                 <div className="h-72 w-full rounded-xl border border-slate-200 bg-white p-2">
                   <ResponsiveContainer>
@@ -430,8 +425,8 @@ export default function ResearchDemoPage() {
                       <YAxis dataKey="y" name="PCA-2" />
                       <Tooltip />
                       <Legend />
-                      <Scatter name="Patient clusters" data={clusterScatterData} fill="#60a5fa" />
-                      <Scatter name="Current patient" data={[patientPoint]} fill="#ef4444" />
+                      <Scatter name="Cluster centers" data={clusterScatterData} fill="#60a5fa" />
+                      <Scatter name="Current patient" data={patientPoint} fill="#ef4444" />
                     </ScatterChart>
                   </ResponsiveContainer>
                 </div>
@@ -490,7 +485,7 @@ export default function ResearchDemoPage() {
           <>
             <XrayViewer
               original_b64={xrayPreview}
-              gradcam_b64={cnnResultsQuery.data?.gradcam_plot}
+              gradcam_b64={xrayMutation.data.gradcam_b64}
               label={xrayMutation.data.label}
               confidence={xrayMutation.data.confidence}
               showConfidence
