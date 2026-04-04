@@ -10,12 +10,14 @@ from typing import Any
 
 import joblib
 import matplotlib
+import pandas as pd
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.linear_model import LassoCV
 from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import Ridge
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics import mean_absolute_error
 from sklearn.metrics import mean_squared_error
@@ -25,6 +27,9 @@ from sklearn.preprocessing import StandardScaler
 
 from ml.data_utils import default_csv_path
 from ml.data_utils import prepare_modeling_dataframe
+
+TARGET = "time_in_hospital"
+ID_COLS = ("encounter_id", "patient_nbr")
 
 
 def _to_base64_png() -> str:
@@ -56,6 +61,31 @@ def _default_models_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "models"
 
 
+def _load_target_from_raw_csv(csv_path: Path) -> pd.Series:
+    raw_df = pd.read_csv(csv_path).replace("?", np.nan)
+
+    # Remove raw identifier columns before any further processing.
+    raw_df = raw_df.drop(columns=[col for col in ID_COLS if col in raw_df.columns])
+
+    if TARGET not in raw_df.columns:
+        raise KeyError(f"Target column '{TARGET}' not found in raw dataset.")
+
+    y = pd.to_numeric(raw_df[TARGET], errors="coerce")
+    if y.isna().any():
+        raise ValueError("Target column contains non-numeric or missing values after coercion.")
+
+    y = y.astype(float).reset_index(drop=True)
+    y_min = float(y.min())
+    y_max = float(y.max())
+    y_mean = float(y.mean())
+
+    print("Target stats:")
+    print(f"  Min: {y_min:.1f}, Max: {y_max:.1f}, Mean: {y_mean:.2f}")
+
+    assert y_min >= 1 and y_max <= 14, f"Target out of expected range: {y_min} - {y_max}"
+    return y
+
+
 def train_and_evaluate_regression(
     csv_path: str | Path | None = None,
     models_dir: str | Path | None = None,
@@ -67,15 +97,23 @@ def train_and_evaluate_regression(
     regression_dir = models_dir / "regression"
     regression_dir.mkdir(parents=True, exist_ok=True)
 
+    y = _load_target_from_raw_csv(csv_path)
+
     df = prepare_modeling_dataframe(csv_path)
-    if "time_in_hospital" not in df.columns:
-        raise KeyError("Target column 'time_in_hospital' not found after preprocessing.")
+    if TARGET not in df.columns:
+        raise KeyError(f"Target column '{TARGET}' not found after preprocessing.")
 
-    id_cols = [col for col in ("encounter_id", "patient_nbr") if col in df.columns]
-    drop_cols = ["time_in_hospital"] + id_cols
+    drop_cols = [TARGET] + [col for col in ID_COLS if col in df.columns]
+    X = df.drop(columns=[col for col in drop_cols if col in df.columns]).reset_index(drop=True)
 
-    X = df.drop(columns=drop_cols)
-    y = df["time_in_hospital"].astype(float)
+    id_features_present = [col for col in ID_COLS if col in X.columns]
+    if id_features_present:
+        raise ValueError(f"Identifier columns leaked into feature matrix: {id_features_present}")
+
+    if len(X) != len(y):
+        raise ValueError(
+            f"Feature/target row mismatch after preprocessing: X={len(X)}, y={len(y)}"
+        )
 
     X_train, X_test, y_train, y_test = train_test_split(
         X,
@@ -111,6 +149,20 @@ def train_and_evaluate_regression(
         model.fit(X_train_scaled, y_train)
         y_pred = model.predict(X_test_scaled)
 
+        stabilized_linear = False
+        if model_name == "LinearRegression":
+            max_abs_pred = float(np.nanmax(np.abs(y_pred))) if y_pred.size else 0.0
+            if (not np.isfinite(y_pred).all()) or max_abs_pred > 1000.0:
+                print(
+                    "[WARN] LinearRegression produced unstable predictions; "
+                    "refitting with Ridge(alpha=1.0) surrogate."
+                )
+                surrogate_model = Ridge(alpha=1.0, random_state=42)
+                surrogate_model.fit(X_train_scaled, y_train)
+                model = surrogate_model
+                y_pred = model.predict(X_test_scaled)
+                stabilized_linear = True
+
         mse = float(mean_squared_error(y_test, y_pred))
         rmse = float(np.sqrt(mse))
         mae = float(mean_absolute_error(y_test, y_pred))
@@ -125,6 +177,8 @@ def train_and_evaluate_regression(
 
         if hasattr(model, "alpha_"):
             metrics["best_alpha"] = float(model.alpha_)
+        if model_name == "LinearRegression":
+            metrics["stabilized"] = stabilized_linear
 
         scatter_plot_b64 = _actual_vs_predicted_plot(y_test.to_numpy(), y_pred, model_name)
 
@@ -156,7 +210,7 @@ def train_and_evaluate_regression(
 
     summary: dict[str, Any] = {
         "task": "regression",
-        "target": "time_in_hospital",
+        "target": TARGET,
         "train_shape": [int(X_train.shape[0]), int(X_train.shape[1])],
         "test_shape": [int(X_test.shape[0]), int(X_test.shape[1])],
         "models": model_results,

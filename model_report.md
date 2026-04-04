@@ -1,85 +1,72 @@
 # HealthLens Model Report
 
-## 1) Dataset Statistics
+## 1. Dataset Statistics
 
 | Metric | Value |
 |---|---:|
-| Dataset file | `archive/diabetic_data.csv` |
-| Rows | 101,766 |
+| Source CSV | /home/chirag/Desktop/HealthLens/archive/diabetic_data.csv |
+| Rows | 101766 |
 | Columns | 50 |
-| 30-day readmission positives (`<30`) | 11,357 |
-| 30-day readmission rate | 11.16% |
+| Positive 30-day readmissions | 11357 |
+| Positive rate | 0.1116 |
+| Train shape | (81412, 90) |
+| Test shape | (20354, 90) |
+| Processed feature count | 90 |
 
-Notes:
-- Stats above are from the currently available local diabetes tabular dataset snapshot.
-- CNN/Autoencoder metrics are from `models/cnn_results.json` and `models/autoencoder_results.json`.
-- LSTM metrics are from `models/lstm_results.json`.
-- Classical ML summary artifacts (`models/classification/results.json`, `models/regression/results.json`) were not present at report generation time.
-
-## 2) Side-by-Side Model Metrics
+## 2. Model Metrics (Side-by-Side)
 
 ### Classification and Risk Models
 
 | Model | Accuracy | F1 | AUC |
 |---|---:|---:|---:|
-| Logistic Regression | N/A | N/A | N/A |
-| Decision Tree | N/A | N/A | N/A |
-| Random Forest | N/A | N/A | N/A |
-| KNN | N/A | N/A | N/A |
+| Logistic Regression | 0.8884 | 0.8379 | 0.6766 |
+| Decision Tree | 0.8009 | 0.8068 | 0.5300 |
+| Random Forest | 0.7532 | 0.7875 | 0.6789 |
+| KNN | 0.8854 | 0.8413 | 0.5805 |
 | SVM | N/A | N/A | N/A |
-| ANN (Readmission) | 0.7340 | 0.2660 | 0.6398 |
-| CNN (Pneumonia) | 0.8846 | 0.9135 | 0.9611 |
-| LSTM (Sepsis Risk) | N/A | N/A | 0.4889 |
+| ANN | 0.7387 | 0.2646 | 0.6397 |
+| CNN | 0.8766 | 0.9082 | 0.9626 |
+| LSTM Sepsis | N/A | N/A | 0.5258 |
 
-### Regression / Forecast / Reconstruction Models
+### Regression / Reconstruction / Forecast Models
 
 | Model | MAE | RMSE | R2 | Test MSE |
 |---|---:|---:|---:|---:|
-| Linear Regression | N/A | N/A | N/A | N/A |
-| LSTM Vitals Forecast | 0.0321 | N/A | N/A | 0.0018 |
-| Autoencoder Reconstruction | N/A | N/A | N/A | 0.0025 |
+| Linear Regression | 107547595132.6749 | 2072168934001.9255 | -493318792562231981637632.0000 | N/A |
+| LSTM Vitals Forecast | 0.0364 | N/A | N/A | 0.0023 |
+| Autoencoder Reconstruction | N/A | N/A | N/A | 0.0026 |
 
-## 3) Best Models (Current Snapshot)
+## 3. Best Models
 
-- Best AUC: CNN (0.9611)
-- Best Accuracy: CNN (0.8846)
-- Best tabular classification AUC (available): ANN (0.6398)
-- Best regression model: Not available in current artifact snapshot
+- Best AUC model: Random Forest (0.6789)
+- Best Accuracy model: Logistic Regression (0.8884)
+- Best RMSE model (lower is better): Linear Regression (2072168934001.9255)
 
-## 4) Training Time Comparison
+## 4. Training Time Comparison
 
 | Pipeline Step | Time (seconds) |
 |---|---:|
-| Preprocessing | Pending (`train_all.py`) |
-| Regression (Linear/Ridge/Lasso) | Pending (`train_all.py`) |
-| Classification (LogReg/DT/RF/KNN/SVM) | Pending (`train_all.py`) |
-| ANN | Pending (`train_all.py`) |
-| CNN | Pending (`train_all.py`) |
-| Autoencoder | Pending (`train_all.py`) |
-| LSTM (Task A + Task B) | Pending (`train_all.py`) |
-| Total | Pending (`train_all.py`) |
+| ann | 0.000 |
+| autoencoder | 1613.932 |
+| classification | 0.000 |
+| cnn | 1270.018 |
+| lstm | 500.541 |
+| preprocessing | 2.593 |
+| regression | 0.000 |
 
-To generate a fully timed report with all model rows populated, run:
-
-```bash
-cd backend
-python train_all.py --data-dir ./data --models-dir ./models
-```
-
-This command writes:
-- `models/results_summary.json`
-- `../model_report.md` (regenerated)
-
-## 5) Limitations and Next Steps
+## 5. Limitations and Next Steps
 
 ### Current limitations
-- Classical ML summary files are currently missing in this workspace snapshot, so those table rows are `N/A`.
-- Inference for `/predict/full` uses a compact structured request and fills many sparse one-hot features with defaults.
-- Sepsis and readmission models are trained on different data modalities and should not be interpreted as a single clinically calibrated score.
-- SHAP explainability is tied to RandomForest and can add latency under high request throughput.
+- Inference uses a reduced structured feature set and default values for many sparse one-hot features.
+- Model drift monitoring and calibration tracking are not yet automated in production.
+- Deep learning training cost is high; repeated full retraining can be time-intensive.
+- Explainability is currently tied to random forest SHAP at prediction time and may add latency.
 
 ### Recommended next steps
-1. Run `train_all.py` end-to-end to produce complete metrics and timing outputs for all required models.
-2. Export and version a training feature-contract artifact (column ordering + category mapping) for stricter inference parity.
-3. Add automated calibration and drift checks (e.g., reliability curves, Brier score, PSI/KS monitoring).
-4. Cache SHAP explainers and add API-level performance benchmarks for `/predict/full`.
+1. Add a reproducible feature-contract artifact (column schema + category encoding map) from training and consume it in inference.
+2. Add test-time and production calibration checks (Brier score, reliability curves) for ANN and RF outputs.
+3. Persist and compare historical training metrics to detect regressions automatically in CI.
+4. Add model serving benchmarks and caching for SHAP explainers in long-running API processes.
+
+---
+Report generated at: 2026-04-04T06:47:39.564884+00:00

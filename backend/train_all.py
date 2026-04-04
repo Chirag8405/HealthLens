@@ -261,6 +261,7 @@ def _build_results_summary(
     autoencoder_summary: dict[str, Any],
     lstm_summary: dict[str, Any],
     timers: list[TimerResult],
+    cached_modules: list[str],
 ) -> dict[str, Any]:
     timing_map = {timer.name: round(timer.seconds, 3) for timer in timers}
 
@@ -274,6 +275,7 @@ def _build_results_summary(
         },
         "dataset_stats": _build_dataset_stats(csv_path, preprocessing_summary),
         "timings_seconds": timing_map,
+        "cached_modules": sorted(cached_modules),
         "models": {
             "preprocessing": preprocessing_summary,
             "linear_regression": _extract_model_metrics(regression_summary, "LinearRegression"),
@@ -302,6 +304,7 @@ def _print_summary_table(summary: dict[str, Any]) -> None:
 
     models = summary.get("models", {})
     timings = summary.get("timings_seconds", {})
+    cached_modules = summary.get("cached_modules", [])
 
     rows.extend(
         [
@@ -323,6 +326,10 @@ def _print_summary_table(summary: dict[str, Any]) -> None:
     print("\n=== HEALTHLENS TRAINING SUMMARY ===")
     for label, value in rows:
         print(f"{label:<36} : {value}")
+
+    if cached_modules:
+        print("Cached modules:", ", ".join(sorted(str(name) for name in cached_modules)))
+        print("Note: Modules showing 0.000s were loaded from cached artifacts. Use --force to retrain all modules.")
 
 
 def _best_model(metrics: dict[str, dict[str, Any]], key: str, maximize: bool = True) -> tuple[str, float] | None:
@@ -352,6 +359,7 @@ def _write_model_report(summary: dict[str, Any], report_path: Path) -> None:
     dataset = summary.get("dataset_stats", {})
     models = summary.get("models", {})
     timings = summary.get("timings_seconds", {})
+    cached_modules = {str(name) for name in summary.get("cached_modules", [])}
 
     classification_metrics = {
         "Logistic Regression": models.get("logistic_regression", {}),
@@ -383,8 +391,13 @@ def _write_model_report(summary: dict[str, Any], report_path: Path) -> None:
     )
 
     training_rows = "\n".join(
-        f"| {name} | {_format_metric(seconds, 3)} |"
+        f"| {name} | {_format_metric(seconds, 3)} | {'(cached — loaded from previous run)' if name in cached_modules else ''} |"
         for name, seconds in sorted(timings.items(), key=lambda x: x[0])
+    )
+    cache_note = (
+        "Note: Modules showing 0.000s were loaded from cached artifacts. Use --force to retrain all modules."
+        if cached_modules
+        else "Note: All modules were freshly trained in this run."
     )
 
     report = f"""# HealthLens Model Report
@@ -433,9 +446,11 @@ def _write_model_report(summary: dict[str, Any], report_path: Path) -> None:
 
 ## 4. Training Time Comparison
 
-| Pipeline Step | Time (seconds) |
-|---|---:|
-{training_rows if training_rows else "| N/A | N/A |"}
+| Pipeline Step | Time (seconds) | Note |
+|---|---:|---|
+{training_rows if training_rows else "| N/A | N/A | N/A |"}
+
+{cache_note}
 
 ## 5. Limitations and Next Steps
 
@@ -493,7 +508,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         model_key: str,
         model_name: str,
         train_callable: Callable[[], dict[str, Any]],
-    ) -> tuple[dict[str, Any], TimerResult]:
+    ) -> tuple[dict[str, Any], TimerResult, bool]:
         result_path = result_paths[model_key]
         if not args.force and result_path.exists():
             print(f"[SKIP] {model_name} — cached results found")
@@ -502,20 +517,22 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
                 return (
                     _normalize_cached_model_summary(model_key, cached_payload),
                     TimerResult(name=model_key, seconds=0.0),
+                    True,
                 )
             print(f"[WARN] {model_name} cache unreadable, retraining")
 
-        return _time_call(model_key, train_callable)
+        result, timer = _time_call(model_key, train_callable)
+        return result, timer, False
 
     preprocessing_pipeline = PreprocessingPipeline(processed_dir=data_dir / "processed")
 
     preprocessing_summary, timer_pre = _time_call("preprocessing", preprocessing_pipeline.run, csv_path)
-    regression_summary, timer_reg = _load_or_train_model(
+    regression_summary, timer_reg, regression_cached = _load_or_train_model(
         model_key="regression",
         model_name="Regression",
         train_callable=lambda: train_and_evaluate_regression(csv_path=csv_path, models_dir=models_dir),
     )
-    classification_summary, timer_cls = _load_or_train_model(
+    classification_summary, timer_cls, classification_cached = _load_or_train_model(
         model_key="classification",
         model_name="Classification",
         train_callable=lambda: train_and_evaluate_classification(
@@ -524,17 +541,17 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
             skip_svm=args.skip_svm,
         ),
     )
-    ann_summary, timer_ann = _load_or_train_model(
+    ann_summary, timer_ann, ann_cached = _load_or_train_model(
         model_key="ann",
         model_name="ANN",
         train_callable=lambda: train_and_evaluate_ann(csv_path=csv_path, models_dir=models_dir),
     )
-    cnn_summary, timer_cnn = _load_or_train_model(
+    cnn_summary, timer_cnn, cnn_cached = _load_or_train_model(
         model_key="cnn",
         model_name="CNN",
         train_callable=lambda: train_and_evaluate_cnn(dataset_root=chest_xray_dir, models_dir=models_dir),
     )
-    autoencoder_summary, timer_auto = _load_or_train_model(
+    autoencoder_summary, timer_auto, autoencoder_cached = _load_or_train_model(
         model_key="autoencoder",
         model_name="Autoencoder",
         train_callable=lambda: train_and_evaluate_autoencoder(
@@ -542,7 +559,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
             models_dir=models_dir,
         ),
     )
-    lstm_summary, timer_lstm = _load_or_train_model(
+    lstm_summary, timer_lstm, lstm_cached = _load_or_train_model(
         model_key="lstm",
         model_name="LSTM",
         train_callable=lambda: train_and_evaluate_lstm(
@@ -552,6 +569,20 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
             max_patients=args.max_patients,
         ),
     )
+
+    cached_modules: list[str] = []
+    if regression_cached:
+        cached_modules.append("regression")
+    if classification_cached:
+        cached_modules.append("classification")
+    if ann_cached:
+        cached_modules.append("ann")
+    if cnn_cached:
+        cached_modules.append("cnn")
+    if autoencoder_cached:
+        cached_modules.append("autoencoder")
+    if lstm_cached:
+        cached_modules.append("lstm")
 
     timers = [timer_pre, timer_reg, timer_cls, timer_ann, timer_cnn, timer_auto, timer_lstm]
 
@@ -568,6 +599,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         autoencoder_summary=autoencoder_summary,
         lstm_summary=lstm_summary,
         timers=timers,
+        cached_modules=cached_modules,
     )
 
     summary_path = models_dir / "results_summary.json"

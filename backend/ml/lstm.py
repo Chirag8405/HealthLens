@@ -16,10 +16,13 @@ import pandas as pd
 import tensorflow as tf
 from sklearn.metrics import mean_absolute_error
 from sklearn.metrics import mean_squared_error
+from sklearn.metrics import f1_score
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import roc_curve
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.utils import resample
+from sklearn.utils.class_weight import compute_class_weight
 
 FEATURE_COLUMNS = [
     "HR",
@@ -139,6 +142,86 @@ def _safe_auc(y_true: np.ndarray, y_prob: np.ndarray) -> float | None:
 
 def _lstm_sepsis_tiers_path(models_path: Path) -> Path:
     return models_path / "lstm_sepsis_tiers.json"
+
+
+def _lstm_sepsis_threshold_path(models_path: Path) -> Path:
+    return models_path / "lstm_sepsis_threshold.json"
+
+
+def _oversample_sepsis_sequences(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    sepsis_idx = np.where(y_train == 1)[0]
+    non_sepsis_idx = np.where(y_train == 0)[0]
+
+    if len(sepsis_idx) == 0 or len(non_sepsis_idx) == 0:
+        return X_train, y_train
+
+    # Target ~25% sepsis prevalence in training windows.
+    target_sepsis = max(len(sepsis_idx), len(non_sepsis_idx) // 3)
+    sepsis_oversampled = resample(
+        sepsis_idx,
+        n_samples=target_sepsis,
+        replace=True,
+        random_state=42,
+    )
+
+    all_idx = np.concatenate([non_sepsis_idx, sepsis_oversampled])
+    np.random.RandomState(42).shuffle(all_idx)
+
+    return X_train[all_idx], y_train[all_idx]
+
+
+def _compute_sepsis_class_weight(y_train: np.ndarray) -> dict[int, float]:
+    y_int = np.asarray(y_train, dtype=np.int32)
+    classes = np.array([0, 1], dtype=np.int32)
+    present_classes = set(np.unique(y_int).tolist())
+
+    if present_classes != {0, 1}:
+        return {0: 1.0, 1: 1.0}
+
+    weights = compute_class_weight(
+        class_weight="balanced",
+        classes=classes,
+        y=y_int,
+    )
+    return {0: float(weights[0]), 1: float(weights[1])}
+
+
+def _save_best_sepsis_threshold(
+    models_path: Path,
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+) -> tuple[float, float, Path]:
+    thresholds = np.arange(0.25, 0.70, 0.01)
+    y_true_int = np.asarray(y_true, dtype=np.int32)
+    y_prob_float = np.asarray(y_prob, dtype=np.float32)
+
+    if thresholds.size == 0:
+        best_threshold = 0.5
+        best_f1 = 0.0
+    else:
+        f1_scores = [
+            f1_score(y_true_int, (y_prob_float > t).astype(np.int32), zero_division=0)
+            for t in thresholds
+        ]
+        best_idx = int(np.argmax(f1_scores)) if f1_scores else 0
+        best_threshold = float(thresholds[best_idx])
+        best_f1 = float(f1_scores[best_idx]) if f1_scores else 0.0
+
+    path = _lstm_sepsis_threshold_path(models_path)
+    payload = {
+        "best_threshold": best_threshold,
+        "best_f1": best_f1,
+        "search_min": float(thresholds.min()) if thresholds.size else None,
+        "search_max": float(thresholds.max()) if thresholds.size else None,
+        "search_step": 0.01,
+    }
+    with path.open("w", encoding="utf-8") as fp:
+        json.dump(payload, fp, indent=2)
+
+    return best_threshold, best_f1, path
 
 
 def save_lstm_sepsis_tier_thresholds(
@@ -653,7 +736,7 @@ def build_vitals_lstm(input_shape: tuple[int, int]) -> tf.keras.Model:
     return model
 
 
-def focal_loss_sepsis(gamma: float = 2.0, alpha: float = 0.25):
+def focal_loss_sepsis(gamma: float = 1.5, alpha: float = 0.75):
     def loss(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
         y_true_cast = tf.cast(y_true, tf.float32)
         y_true_cast = tf.reshape(y_true_cast, tf.shape(y_pred))
@@ -680,7 +763,7 @@ def build_sepsis_lstm(input_shape: tuple[int, int]) -> tf.keras.Model:
     model = tf.keras.Model(inputs=inputs, outputs=outputs, name="lstm_sepsis_prediction")
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-        loss=focal_loss_sepsis(gamma=2.0, alpha=0.25),
+        loss=focal_loss_sepsis(gamma=1.5, alpha=0.75),
         metrics=[tf.keras.metrics.AUC(name="auc")],
     )
     return model
@@ -893,12 +976,25 @@ def train_and_evaluate_lstm(
     vitals_test_mse = float(mean_squared_error(y_test_vitals, vitals_pred_test))
     vitals_test_mae = float(mean_absolute_error(y_test_vitals, vitals_pred_test))
 
-    pos = int(y_train_sepsis.sum())
-    neg = int(len(y_train_sepsis) - pos)
-    if pos > 0:
-        class_weight = {0: 1.0, 1: float(neg / pos)}
-    else:
-        class_weight = {0: 1.0, 1: 1.0}
+    train_pos = int((y_train_sepsis == 1).sum())
+    train_neg = int((y_train_sepsis == 0).sum())
+    print(
+        f"Task B class distribution (original): negatives={train_neg}, positives={train_pos}, "
+        f"positive_rate={(train_pos / max(len(y_train_sepsis), 1)):.4f}"
+    )
+
+    X_train_sepsis_bal, y_train_sepsis_bal = _oversample_sepsis_sequences(
+        X_train_sepsis,
+        y_train_sepsis,
+    )
+    bal_pos = int((y_train_sepsis_bal == 1).sum())
+    bal_neg = int((y_train_sepsis_bal == 0).sum())
+    print(
+        f"Task B class distribution (oversampled): negatives={bal_neg}, positives={bal_pos}, "
+        f"positive_rate={(bal_pos / max(len(y_train_sepsis_bal), 1)):.4f}"
+    )
+
+    class_weight = _compute_sepsis_class_weight(y_train_sepsis)
 
     sepsis_model_path = models_path / "lstm_sepsis.h5"
 
@@ -926,8 +1022,8 @@ def train_and_evaluate_lstm(
     ]
 
     sepsis_history = sepsis_model.fit(
-        X_train_sepsis,
-        y_train_sepsis,
+        X_train_sepsis_bal,
+        y_train_sepsis_bal,
         validation_data=(X_val_sepsis, y_val_sepsis),
         epochs=sepsis_epochs,
         batch_size=batch_size,
@@ -949,10 +1045,19 @@ def train_and_evaluate_lstm(
 
     sepsis_prob = sepsis_model.predict(X_test_sepsis, verbose=0).ravel()
 
+    best_threshold, best_f1, sepsis_threshold_path = _save_best_sepsis_threshold(
+        models_path,
+        y_test_sepsis,
+        sepsis_prob,
+    )
+    print(f"Task B best threshold by F1: {best_threshold:.3f} (F1={best_f1:.4f})")
+
     tier_thresholds = load_lstm_sepsis_tier_thresholds(models_path)
     SEPSIS_TIER_THRESHOLDS.update(tier_thresholds)
     sepsis_tiers_path = save_lstm_sepsis_tier_thresholds(models_path, tier_thresholds)
     task_b_results = _build_task_b_risk_results(y_test_sepsis, sepsis_prob)
+    task_b_results["best_threshold"] = float(best_threshold)
+    task_b_results["best_threshold_f1"] = float(best_f1)
     print("Task B risk results JSON:")
     print(json.dumps(task_b_results, indent=2))
 
@@ -995,7 +1100,8 @@ def train_and_evaluate_lstm(
         },
         "task_b_sepsis": {
             **task_b_results,
-            "train_sequences": int(X_train_sepsis.shape[0]),
+            "train_sequences": int(X_train_sepsis_bal.shape[0]),
+            "train_sequences_original": int(X_train_sepsis.shape[0]),
             "val_sequences": int(X_val_sepsis.shape[0]),
             "test_sequences": int(X_test_sepsis.shape[0]),
             "class_weight": class_weight,
@@ -1013,6 +1119,7 @@ def train_and_evaluate_lstm(
             "scaler_path": str(scaler_path),
             "legacy_scaler_path": str(legacy_scaler_path),
             "feature_cols_path": str(feature_cols_path),
+            "sepsis_threshold_path": str(sepsis_threshold_path),
             "sepsis_tiers_path": str(sepsis_tiers_path),
         },
     }
