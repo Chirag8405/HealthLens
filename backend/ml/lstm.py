@@ -298,11 +298,15 @@ def evaluate_lstm_task_b_risk_only(
     models_path = Path(models_dir) if models_dir is not None else _default_models_dir()
 
     sepsis_model_path = models_path / "lstm_sepsis.h5"
-    scaler_path = models_path / "lstm_minmax_scaler.pkl"
+    scaler_path = models_path / "lstm_scaler.pkl"
+    if not scaler_path.exists():
+        scaler_path = models_path / "lstm_minmax_scaler.pkl"
     if not sepsis_model_path.exists():
         raise FileNotFoundError(f"Sepsis model not found: {sepsis_model_path}")
     if not scaler_path.exists():
-        raise FileNotFoundError(f"LSTM scaler not found: {scaler_path}")
+        raise FileNotFoundError(
+            f"LSTM scaler not found: {models_path / 'lstm_scaler.pkl'} or {models_path / 'lstm_minmax_scaler.pkl'}"
+        )
 
     all_files, total_patients_available, patients_used = _list_patient_files(
         set_a,
@@ -367,11 +371,15 @@ def predict_lstm_sepsis_risk(
 ) -> dict[str, Any]:
     models_path = Path(models_dir) if models_dir is not None else _default_models_dir()
     sepsis_model_path = models_path / "lstm_sepsis.h5"
-    scaler_path = models_path / "lstm_minmax_scaler.pkl"
+    scaler_path = models_path / "lstm_scaler.pkl"
+    if not scaler_path.exists():
+        scaler_path = models_path / "lstm_minmax_scaler.pkl"
     if not sepsis_model_path.exists():
         raise FileNotFoundError(f"Sepsis model not found: {sepsis_model_path}")
     if not scaler_path.exists():
-        raise FileNotFoundError(f"LSTM scaler not found: {scaler_path}")
+        raise FileNotFoundError(
+            f"LSTM scaler not found: {models_path / 'lstm_scaler.pkl'} or {models_path / 'lstm_minmax_scaler.pkl'}"
+        )
 
     try:
         df = pd.read_csv(BytesIO(patient_psv_bytes), sep="|")
@@ -813,8 +821,21 @@ def train_and_evaluate_lstm(
 
     train_scaled, val_scaled, test_scaled, scaler = _scale_features(train_filled, val_filled, test_filled)
 
-    scaler_path = models_path / "lstm_minmax_scaler.pkl"
+    scaler_path = models_path / "lstm_scaler.pkl"
+    legacy_scaler_path = models_path / "lstm_minmax_scaler.pkl"
     joblib.dump(scaler, scaler_path)
+    joblib.dump(scaler, legacy_scaler_path)
+
+    feature_cols_path = models_path / "lstm_feature_cols.json"
+    with feature_cols_path.open("w", encoding="utf-8") as fp:
+        json.dump(
+            {
+                "hr_col_idx": int(FEATURE_COLUMNS.index("HR")),
+                "spo2_col_idx": int(FEATURE_COLUMNS.index("O2Sat")),
+            },
+            fp,
+            indent=2,
+        )
 
     X_train_vitals, y_train_vitals = _build_vitals_sequences(train_scaled, train_lengths, WINDOW_SIZE, STRIDE)
     X_val_vitals, y_val_vitals = _build_vitals_sequences(val_scaled, val_lengths, WINDOW_SIZE, STRIDE)
@@ -990,6 +1011,8 @@ def train_and_evaluate_lstm(
             "vitals_model_path": str(vitals_model_path),
             "sepsis_model_path": str(sepsis_model_path),
             "scaler_path": str(scaler_path),
+            "legacy_scaler_path": str(legacy_scaler_path),
+            "feature_cols_path": str(feature_cols_path),
             "sepsis_tiers_path": str(sepsis_tiers_path),
         },
     }

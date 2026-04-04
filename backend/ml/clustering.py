@@ -115,6 +115,22 @@ def run_clustering(
         clustering_dir / "agglomerative.joblib",
     )
 
+    joblib.dump(pca, models_dir / "pca_2d.pkl")
+
+    centers_2d = pca.transform(kmeans.cluster_centers_)
+    unique, counts = np.unique(kmeans_labels, return_counts=True)
+    cluster_meta = [
+        {
+            "cluster": int(c),
+            "x": round(float(centers_2d[c, 0]), 4),
+            "y": round(float(centers_2d[c, 1]), 4),
+            "size": int(counts[i]),
+        }
+        for i, c in enumerate(unique)
+    ]
+    with (models_dir / "cluster_meta.json").open("w", encoding="utf-8") as fp:
+        json.dump(cluster_meta, fp)
+
     clustering_payload: dict[str, Any] = {
         "n_samples": int(X.shape[0]),
         "n_features": int(X.shape[1]),

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import json
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -13,6 +15,10 @@ from pydantic import Field
 from ml.model_registry import get_model
 
 router = APIRouter()
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+MODELS_DIR = PROJECT_ROOT / "models"
+CLUSTER_META_PATH = MODELS_DIR / "cluster_meta.json"
 
 
 class FullPredictionRequest(BaseModel):
@@ -63,6 +69,11 @@ class TabularArtifacts:
 	classification_selector: Any
 	rf_feature_names: list[str]
 	classification_scaler: Any
+	clustering_model: Any | None
+	clustering_scaler: Any | None
+	clustering_feature_names: list[str]
+	pca_2d: Any | None
+	cluster_centers: list[dict[str, Any]]
 	ann_scaler: Any
 	ann_expected_features: int
 	random_forest_model: Any
@@ -378,6 +389,36 @@ def _load_tabular_artifacts() -> TabularArtifacts:
 			rf_feature_names = [name for name, keep in zip(feature_names, support) if keep]
 
 	classification_scaler = get_model("classification_scaler")
+
+	clustering_model = None
+	clustering_scaler = None
+	clustering_feature_names = feature_names
+	try:
+		clustering_bundle = get_model("kmeans")
+		if isinstance(clustering_bundle, dict):
+			clustering_model = clustering_bundle.get("model")
+			clustering_scaler = clustering_bundle.get("scaler")
+			loaded_feature_names = clustering_bundle.get("feature_names")
+			if isinstance(loaded_feature_names, list) and loaded_feature_names:
+				clustering_feature_names = [str(name) for name in loaded_feature_names]
+		else:
+			clustering_model = clustering_bundle
+	except FileNotFoundError:
+		clustering_model = None
+
+	pca_2d = None
+	try:
+		pca_2d = get_model("pca_2d")
+	except FileNotFoundError:
+		pca_2d = None
+
+	cluster_centers: list[dict[str, Any]] = []
+	if CLUSTER_META_PATH.exists():
+		with CLUSTER_META_PATH.open("r", encoding="utf-8") as fp:
+			loaded_meta = json.load(fp)
+		if isinstance(loaded_meta, list):
+			cluster_centers = loaded_meta
+
 	ann_scaler = get_model("ann_scaler")
 	ann_expected_features = int(getattr(ann_scaler, "n_features_in_", len(feature_names)))
 	random_forest_model = get_model("rf")
@@ -396,6 +437,11 @@ def _load_tabular_artifacts() -> TabularArtifacts:
 		classification_selector=classification_selector,
 		rf_feature_names=rf_feature_names,
 		classification_scaler=classification_scaler,
+		clustering_model=clustering_model,
+		clustering_scaler=clustering_scaler,
+		clustering_feature_names=clustering_feature_names,
+		pca_2d=pca_2d,
+		cluster_centers=cluster_centers,
 		ann_scaler=ann_scaler,
 		ann_expected_features=ann_expected_features,
 		random_forest_model=random_forest_model,
@@ -416,6 +462,25 @@ def _predict_full_internal(request: FullPredictionRequest, artifacts: TabularArt
 
 	rf_scaled = artifacts.classification_scaler.transform(rf_input)
 
+	value_by_name = {name: float(raw_vector[idx]) for idx, name in enumerate(artifacts.feature_names)}
+	cluster_vector = np.asarray(
+		[value_by_name.get(name, 0.0) for name in artifacts.clustering_feature_names],
+		dtype=np.float64,
+	).reshape(1, -1)
+
+	if artifacts.clustering_scaler is not None:
+		X_processed = artifacts.clustering_scaler.transform(cluster_vector)
+	else:
+		X_processed = cluster_vector
+
+	patient_cluster = -1
+	if artifacts.clustering_model is not None:
+		patient_cluster = int(artifacts.clustering_model.predict(X_processed)[0])
+
+	patient_2d: np.ndarray | None = None
+	if artifacts.pca_2d is not None:
+		patient_2d = artifacts.pca_2d.transform(X_processed)[0]
+
 	rf_probability = float(artifacts.random_forest_model.predict_proba(rf_scaled)[0, 1])
 	ann_probability = rf_probability
 	if raw_2d.shape[1] == artifacts.ann_expected_features:
@@ -435,14 +500,26 @@ def _predict_full_internal(request: FullPredictionRequest, artifacts: TabularArt
 	level = _risk_level(rf_probability, artifacts.ann_threshold)
 	recommendation = _recommendation_for_level(level)
 
-	return {
+	response: dict[str, Any] = {
 		"readmission_risk_30day": round(rf_probability, 6),
 		"risk_level": level,
 		"top_risk_factors": top_factors,
 		"ann_confidence": round(ann_probability, 6),
 		"rf_confidence": round(rf_probability, 6),
 		"recommendation": recommendation,
+		"patient_cluster": patient_cluster,
 	}
+
+	if patient_2d is not None:
+		response["pca_position"] = {
+			"x": round(float(patient_2d[0]), 4),
+			"y": round(float(patient_2d[1]), 4),
+		}
+
+	if artifacts.cluster_centers:
+		response["cluster_centers"] = artifacts.cluster_centers
+
+	return response
 
 
 @router.post("/full")

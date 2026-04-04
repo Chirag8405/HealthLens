@@ -265,6 +265,66 @@ def _fallback_input_gradient_heatmap(
     return grad_map / max_value if max_value > 0 else grad_map
 
 
+def generate_gradcam_overlay(
+    model: tf.keras.Model,
+    img_array: np.ndarray,
+    original_img: np.ndarray,
+    pred_class: int,
+) -> str:
+    """
+    Generate Grad-CAM heatmap overlaid on original image.
+    Returns a base64-encoded PNG string.
+    """
+    import cv2
+
+    base_model = _get_base_feature_model(model)
+    conv_model = tf.keras.Model(inputs=model.inputs, outputs=base_model.output)
+
+    base_model_index = model.layers.index(base_model)
+    classifier_input = tf.keras.Input(shape=base_model.output_shape[1:])
+    x = classifier_input
+    for layer in model.layers[base_model_index + 1 :]:
+        x = layer(x)
+    classifier_model = tf.keras.Model(classifier_input, x)
+
+    input_tensor = tf.convert_to_tensor(img_array, dtype=tf.float32)
+    with tf.GradientTape() as tape:
+        conv_outputs = conv_model(input_tensor, training=False)
+        tape.watch(conv_outputs)
+        predictions = classifier_model(conv_outputs, training=False)
+
+        if predictions.shape[-1] == 1:
+            target = predictions[:, 0] if int(pred_class) == 1 else (1.0 - predictions[:, 0])
+        else:
+            target = predictions[:, int(pred_class)]
+
+    grads = tape.gradient(target, conv_outputs)
+    if grads is None:
+        heatmap = np.zeros((IMAGE_SIZE[0], IMAGE_SIZE[1]), dtype=np.float32)
+    else:
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        conv_outputs = conv_outputs[0]
+        heatmap = tf.reduce_sum(conv_outputs * pooled_grads, axis=-1)
+        heatmap = tf.maximum(heatmap, 0)
+        max_value = tf.reduce_max(heatmap)
+        heatmap = tf.where(max_value > 0, heatmap / max_value, heatmap)
+        heatmap = heatmap.numpy()
+
+    heatmap_resized = cv2.resize(heatmap, (IMAGE_SIZE[0], IMAGE_SIZE[1]))
+    heatmap_colored = cv2.applyColorMap(np.uint8(255 * np.clip(heatmap_resized, 0.0, 1.0)), cv2.COLORMAP_JET)
+    heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+
+    original_rgb = original_img.astype(np.float32)
+    overlay = (original_rgb * 0.6) + (heatmap_colored.astype(np.float32) * 0.4)
+    overlay = np.clip(overlay, 0, 255).astype(np.uint8)
+
+    pil_img = Image.fromarray(overlay)
+    buffer = BytesIO()
+    pil_img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return base64.b64encode(buffer.read()).decode("utf-8")
+
+
 def _collect_gradcam_samples(test_dir: Path) -> list[tuple[str, Path]]:
     classes = ["NORMAL", "PNEUMONIA"]
     extensions = ["*.jpeg", "*.jpg", "*.png", "*.bmp", "*.webp"]

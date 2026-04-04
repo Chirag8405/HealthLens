@@ -30,6 +30,7 @@ def _get_path(name: str) -> str:
         "autoencoder": [base / "autoencoder.h5"],
         "lstm_vitals": [base / "lstm_vitals.h5"],
         "lstm_sepsis": [base / "lstm_sepsis.h5"],
+        "kmeans": [base / "clustering" / "kmeans.joblib"],
         "rf": [base / "rf_model.pkl", base / "classification" / "randomforestclassifier.joblib"],
         "svm": [base / "svm_model.pkl", base / "classification" / "svc.joblib"],
         "scaler": [base / "scaler.pkl", base / "classification" / "scaler.pkl"],
@@ -38,7 +39,9 @@ def _get_path(name: str) -> str:
         "classification_scaler": [base / "classification" / "scaler.pkl"],
         "feature_names": [base / "classification" / "feature_names.json"],
         "classification_selector": [base / "classification" / "variance_selector.pkl"],
-        "lstm_scaler": [base / "lstm_minmax_scaler.pkl"],
+        "lstm_scaler": [base / "lstm_scaler.pkl", base / "lstm_minmax_scaler.pkl"],
+        "lstm_feature_cols": [base / "lstm_feature_cols.json"],
+        "pca_2d": [base / "pca_2d.pkl"],
     }
 
     if name not in paths:

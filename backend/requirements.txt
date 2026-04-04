@@ -8,6 +8,7 @@ tensorflow==2.16.1
 matplotlib==3.8.4
 seaborn==0.13.2
 Pillow==10.3.0
+opencv-python-headless==4.10.0.84
 python-multipart==0.0.9
 joblib==1.4.2
 shap==0.45.0
