@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from typing import Callable
 
 import pandas as pd
 
@@ -25,6 +26,16 @@ from ml.regression import train_and_evaluate_regression
 class TimerResult:
     name: str
     seconds: float
+
+
+RESULT_CHECKPOINT_FILES: dict[str, str] = {
+    "regression": "regression_results.json",
+    "classification": "ml_results.json",
+    "ann": "ann_results.json",
+    "cnn": "cnn_results.json",
+    "autoencoder": "autoencoder_results.json",
+    "lstm": "lstm_results.json",
+}
 
 
 def _round_float(value: Any, digits: int = 6) -> float | None:
@@ -109,8 +120,98 @@ def _extract_model_metrics(summary: dict[str, Any], model_name: str) -> dict[str
 def _safe_read_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
-    with path.open("r", encoding="utf-8") as fp:
-        return json.load(fp)
+    try:
+        with path.open("r", encoding="utf-8") as fp:
+            payload = json.load(fp)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    return payload if isinstance(payload, dict) else None
+
+
+def _normalize_regression_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(payload.get("models"), dict):
+        return payload
+
+    model_map = {
+        "linear_regression": "LinearRegression",
+        "ridge": "Ridge",
+        "lasso": "Lasso",
+    }
+    normalized_models: dict[str, Any] = {}
+
+    for payload_key, model_name in model_map.items():
+        model_payload = payload.get(payload_key)
+        if not isinstance(model_payload, dict):
+            continue
+
+        metrics = {
+            "mse": model_payload.get("mse"),
+            "rmse": model_payload.get("rmse"),
+            "mae": model_payload.get("mae"),
+            "r2": model_payload.get("r2"),
+        }
+        if model_payload.get("best_alpha") is not None:
+            metrics["best_alpha"] = model_payload.get("best_alpha")
+
+        normalized_models[model_name] = {
+            "model_name": model_name,
+            "metrics": metrics,
+            "actual_vs_predicted_plot": model_payload.get("actual_vs_predicted_b64", ""),
+        }
+
+    return {
+        "task": "regression",
+        "target": "time_in_hospital",
+        "models": normalized_models,
+    }
+
+
+def _normalize_classification_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(payload.get("models"), dict):
+        return payload
+
+    model_map = {
+        "logistic_regression": "LogisticRegression",
+        "decision_tree": "DecisionTreeClassifier",
+        "random_forest": "RandomForestClassifier",
+        "knn": "KNeighborsClassifier",
+        "svm": "SVC",
+    }
+    normalized_models: dict[str, Any] = {}
+
+    for payload_key, model_name in model_map.items():
+        model_payload = payload.get(payload_key)
+        if not isinstance(model_payload, dict):
+            continue
+
+        normalized_models[model_name] = {
+            "model_name": model_name,
+            "best_params": {},
+            "metrics": {
+                "accuracy": model_payload.get("accuracy"),
+                "precision": model_payload.get("precision"),
+                "recall": model_payload.get("recall"),
+                "f1_weighted": model_payload.get("f1"),
+                "auc_roc": model_payload.get("auc"),
+            },
+            "confusion_matrix_plot": model_payload.get("confusion_matrix_b64", ""),
+        }
+
+    return {
+        "task": "classification",
+        "target": "readmitted_30",
+        "models": normalized_models,
+        "roc_curve_plot": payload.get("roc_overlay_b64", ""),
+    }
+
+
+def _normalize_cached_model_summary(model_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if model_key == "regression":
+        return _normalize_regression_summary(payload)
+    if model_key == "classification":
+        return _normalize_classification_summary(payload)
+    return payload
 
 
 def _build_dataset_stats(csv_path: Path, preprocessing_summary: dict[str, Any] | None) -> dict[str, Any]:
@@ -384,33 +485,72 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         print(f"Report written to: {report_path}")
         return existing
 
+    result_paths = {
+        key: models_dir / filename for key, filename in RESULT_CHECKPOINT_FILES.items()
+    }
+
+    def _load_or_train_model(
+        model_key: str,
+        model_name: str,
+        train_callable: Callable[[], dict[str, Any]],
+    ) -> tuple[dict[str, Any], TimerResult]:
+        result_path = result_paths[model_key]
+        if not args.force and result_path.exists():
+            print(f"[SKIP] {model_name} — cached results found")
+            cached_payload = _safe_read_json(result_path)
+            if cached_payload is not None:
+                return (
+                    _normalize_cached_model_summary(model_key, cached_payload),
+                    TimerResult(name=model_key, seconds=0.0),
+                )
+            print(f"[WARN] {model_name} cache unreadable, retraining")
+
+        return _time_call(model_key, train_callable)
+
     preprocessing_pipeline = PreprocessingPipeline(processed_dir=data_dir / "processed")
 
     preprocessing_summary, timer_pre = _time_call("preprocessing", preprocessing_pipeline.run, csv_path)
-    regression_summary, timer_reg = _time_call(
-        "regression", train_and_evaluate_regression, csv_path=csv_path, models_dir=models_dir
+    regression_summary, timer_reg = _load_or_train_model(
+        model_key="regression",
+        model_name="Regression",
+        train_callable=lambda: train_and_evaluate_regression(csv_path=csv_path, models_dir=models_dir),
     )
-    classification_summary, timer_cls = _time_call(
-        "classification",
-        train_and_evaluate_classification,
-        csv_path=csv_path,
-        models_dir=models_dir,
-        skip_svm=args.skip_svm,
+    classification_summary, timer_cls = _load_or_train_model(
+        model_key="classification",
+        model_name="Classification",
+        train_callable=lambda: train_and_evaluate_classification(
+            csv_path=csv_path,
+            models_dir=models_dir,
+            skip_svm=args.skip_svm,
+        ),
     )
-    ann_summary, timer_ann = _time_call("ann", train_and_evaluate_ann, csv_path=csv_path, models_dir=models_dir)
-    cnn_summary, timer_cnn = _time_call(
-        "cnn", train_and_evaluate_cnn, dataset_root=chest_xray_dir, models_dir=models_dir
+    ann_summary, timer_ann = _load_or_train_model(
+        model_key="ann",
+        model_name="ANN",
+        train_callable=lambda: train_and_evaluate_ann(csv_path=csv_path, models_dir=models_dir),
     )
-    autoencoder_summary, timer_auto = _time_call(
-        "autoencoder", train_and_evaluate_autoencoder, dataset_root=chest_xray_dir, models_dir=models_dir
+    cnn_summary, timer_cnn = _load_or_train_model(
+        model_key="cnn",
+        model_name="CNN",
+        train_callable=lambda: train_and_evaluate_cnn(dataset_root=chest_xray_dir, models_dir=models_dir),
     )
-    lstm_summary, timer_lstm = _time_call(
-        "lstm",
-        train_and_evaluate_lstm,
-        set_a_dir=lstm_set_a,
-        set_b_dir=lstm_set_b,
-        models_dir=models_dir,
-        max_patients=args.max_patients,
+    autoencoder_summary, timer_auto = _load_or_train_model(
+        model_key="autoencoder",
+        model_name="Autoencoder",
+        train_callable=lambda: train_and_evaluate_autoencoder(
+            dataset_root=chest_xray_dir,
+            models_dir=models_dir,
+        ),
+    )
+    lstm_summary, timer_lstm = _load_or_train_model(
+        model_key="lstm",
+        model_name="LSTM",
+        train_callable=lambda: train_and_evaluate_lstm(
+            set_a_dir=lstm_set_a,
+            set_b_dir=lstm_set_b,
+            models_dir=models_dir,
+            max_patients=args.max_patients,
+        ),
     )
 
     timers = [timer_pre, timer_reg, timer_cls, timer_ann, timer_cnn, timer_auto, timer_lstm]
@@ -503,6 +643,11 @@ def parse_args() -> argparse.Namespace:
         "--skip-svm",
         action="store_true",
         help="Skip SVM during classification training to reduce CPU runtime.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force retraining all models even when cached result files are present.",
     )
     return parser.parse_args()
 
