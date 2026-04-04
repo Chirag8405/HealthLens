@@ -1,13 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import { useQuery } from "@tanstack/react-query";
 import {
   CartesianGrid,
   Legend,
-  Line,
-  LineChart,
   ResponsiveContainer,
   Scatter,
   ScatterChart,
@@ -21,11 +19,60 @@ import LoadingSpinner from "@/components/LoadingSpinner";
 import MetricCard from "@/components/MetricCard";
 import PlotViewer from "@/components/PlotViewer";
 import { fetchAPI } from "@/lib/api";
-import type { ClassificationModelResult, ClusteringResultsResponse, MlResultsResponse } from "@/lib/types";
+import type { ClusteringResultsResponse } from "@/lib/types";
 
-type CurvePoint = {
-  fpr: number;
-  tpr: number;
+type NumericMetric = number | null | undefined;
+
+type ModelMetrics = {
+  accuracy?: number;
+  precision?: number;
+  recall?: number;
+  f1?: number;
+  auc?: number | null;
+  mae?: number;
+  rmse?: number;
+  r2?: number;
+  mse?: number;
+  best_alpha?: number;
+  confusion_matrix?: number[][];
+  confusion_matrix_b64?: string;
+  roc_curve_b64?: string;
+  actual_vs_predicted_b64?: string;
+  [key: string]: unknown;
+};
+
+type ClassificationResultsPayload = {
+  logistic_regression?: ModelMetrics;
+  decision_tree?: ModelMetrics;
+  random_forest?: ModelMetrics;
+  knn?: ModelMetrics;
+  svm?: ModelMetrics;
+  roc_overlay_b64?: string;
+  meta?: {
+    train_rows?: number;
+    test_rows?: number;
+    n_features_after_variance?: number;
+  };
+  trained_at?: string;
+  [key: string]: unknown;
+};
+
+type RegressionResultsPayload = {
+  linear_regression?: ModelMetrics;
+  ridge?: ModelMetrics;
+  lasso?: ModelMetrics;
+  meta?: {
+    train_rows?: number;
+    test_rows?: number;
+  };
+  trained_at?: string;
+  [key: string]: unknown;
+};
+
+type MlSummaryResponse = {
+  status?: string;
+  classification?: ClassificationResultsPayload;
+  regression?: RegressionResultsPayload;
 };
 
 type ComparisonRow = {
@@ -39,70 +86,77 @@ type ComparisonRow = {
   r2?: number;
 };
 
-const linePalette = ["#2e75b6", "#0f766e", "#be123c", "#b45309", "#475569", "#7c3aed"];
-const emptyClassificationModels: Record<string, ClassificationModelResult> = {};
+type PlotModelRow = {
+  key: string;
+  label: string;
+  metrics: ModelMetrics;
+};
 
-function formatMetric(value: number | null | undefined, digits = 3): string {
+const emptyClassification: ClassificationResultsPayload = {};
+const emptyRegression: RegressionResultsPayload = {};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function toNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function toNullableNumber(value: unknown): number | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  return toNumber(value);
+}
+
+function formatMetric(value: NumericMetric, digits = 3): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
     return "--";
   }
   return value.toFixed(digits);
 }
 
-function makeApproxRocCurve(auc?: number | null): CurvePoint[] {
-  const safeAuc = auc && auc > 0 ? Math.min(0.99, auc) : 0.5;
-  const exponent = Math.max(0.3, 1 / safeAuc - 1);
+function modelLabel(modelKey: string): string {
+  const labels: Record<string, string> = {
+    logistic_regression: "Logistic Regression",
+    decision_tree: "Decision Tree",
+    random_forest: "Random Forest",
+    knn: "KNN",
+    svm: "SVM",
+    linear_regression: "Linear Regression",
+    ridge: "Ridge",
+    lasso: "Lasso",
+  };
 
-  const points: CurvePoint[] = [];
-  for (let i = 0; i <= 20; i += 1) {
-    const fpr = i / 20;
-    const tpr = Math.min(1, Math.pow(fpr, exponent));
-    points.push({ fpr, tpr });
+  if (labels[modelKey]) {
+    return labels[modelKey];
   }
-  return points;
+
+  return modelKey
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
-function buildCurve(model: ClassificationModelResult): CurvePoint[] {
-  const curve = model.roc_curve;
-  if (curve && curve.fpr.length > 1 && curve.tpr.length > 1) {
-    const length = Math.min(curve.fpr.length, curve.tpr.length);
-    return Array.from({ length }, (_, idx) => ({
-      fpr: Math.max(0, Math.min(1, curve.fpr[idx])),
-      tpr: Math.max(0, Math.min(1, curve.tpr[idx])),
-    })).sort((a, b) => a.fpr - b.fpr);
+function extractModelRows(payload: Record<string, unknown> | undefined): PlotModelRow[] {
+  if (!payload) {
+    return [];
   }
 
-  return makeApproxRocCurve(model.metrics?.auc_roc);
-}
-
-function interpolateTpr(curve: CurvePoint[], targetFpr: number): number {
-  if (curve.length === 0) {
-    return targetFpr;
-  }
-  if (targetFpr <= curve[0].fpr) {
-    return curve[0].tpr;
-  }
-  if (targetFpr >= curve[curve.length - 1].fpr) {
-    return curve[curve.length - 1].tpr;
-  }
-
-  for (let idx = 1; idx < curve.length; idx += 1) {
-    const prev = curve[idx - 1];
-    const next = curve[idx];
-    if (targetFpr >= prev.fpr && targetFpr <= next.fpr) {
-      const range = next.fpr - prev.fpr || 1;
-      const ratio = (targetFpr - prev.fpr) / range;
-      return prev.tpr + ratio * (next.tpr - prev.tpr);
-    }
-  }
-
-  return targetFpr;
+  return Object.entries(payload)
+    .filter(([key, value]) => key !== "meta" && key !== "trained_at" && isRecord(value))
+    .map(([key, value]) => ({
+      key,
+      label: modelLabel(key),
+      metrics: value as ModelMetrics,
+    }));
 }
 
 export default function MlModelsPage() {
-  const mlQuery = useQuery({
-    queryKey: ["ml-results"],
-    queryFn: () => fetchAPI<MlResultsResponse>("/ml/results"),
+  const summaryQuery = useQuery({
+    queryKey: ["ml-summary"],
+    queryFn: () => fetchAPI<MlSummaryResponse>("/ml/results/summary"),
   });
 
   const clustersQuery = useQuery({
@@ -110,59 +164,83 @@ export default function MlModelsPage() {
     queryFn: () => fetchAPI<ClusteringResultsResponse>("/ml/clusters"),
   });
 
-  const classificationModels = useMemo(
-    () => mlQuery.data?.classification?.models ?? emptyClassificationModels,
-    [mlQuery.data?.classification?.models],
+  const [plotsVisible, setPlotsVisible] = useState(false);
+  const [plotsLoading, setPlotsLoading] = useState(false);
+  const [plotsError, setPlotsError] = useState<string | null>(null);
+  const [classificationPlots, setClassificationPlots] = useState<ClassificationResultsPayload | null>(null);
+  const [selectedPlotModel, setSelectedPlotModel] = useState<string>("");
+
+  const fetchPlots = useCallback(async () => {
+    const data = await fetchAPI<ClassificationResultsPayload>("/ml/results/classification");
+    setClassificationPlots(data);
+  }, []);
+
+  const classificationSummary = summaryQuery.data?.classification ?? emptyClassification;
+  const regressionSummary = summaryQuery.data?.regression ?? emptyRegression;
+
+  const classificationRows = useMemo(
+    () => extractModelRows(classificationSummary as Record<string, unknown>),
+    [classificationSummary],
   );
-  const modelNames = Object.keys(classificationModels);
-
-  const [selectedConfusionModel, setSelectedConfusionModel] = useState<string>("");
-  const [hiddenModels, setHiddenModels] = useState<Record<string, boolean>>({});
-
-  const selectedModelName = selectedConfusionModel || modelNames[0] || "";
-  const selectedModel = selectedModelName ? classificationModels[selectedModelName] : undefined;
+  const regressionRows = useMemo(
+    () => extractModelRows(regressionSummary as Record<string, unknown>),
+    [regressionSummary],
+  );
 
   const comparisonRows = useMemo<ComparisonRow[]>(() => {
     const rows: ComparisonRow[] = [];
 
-    for (const [modelName, model] of Object.entries(classificationModels)) {
+    for (const row of classificationRows) {
       rows.push({
-        model: modelName,
+        model: row.label,
         task: "Classification",
-        accuracy: model.metrics?.accuracy,
-        f1: model.metrics?.f1_weighted ?? model.metrics?.f1,
-        auc: model.metrics?.auc_roc,
+        accuracy: toNumber(row.metrics.accuracy),
+        f1: toNumber(row.metrics.f1),
+        auc: toNullableNumber(row.metrics.auc),
       });
     }
 
-    const regressionModels = mlQuery.data?.regression?.models ?? {};
-    for (const [modelName, model] of Object.entries(regressionModels)) {
+    for (const row of regressionRows) {
       rows.push({
-        model: modelName,
+        model: row.label,
         task: "Regression",
-        mae: model.metrics?.mae,
-        rmse: model.metrics?.rmse,
-        r2: model.metrics?.r2,
+        mae: toNumber(row.metrics.mae),
+        rmse: toNumber(row.metrics.rmse),
+        r2: toNumber(row.metrics.r2),
       });
     }
 
     return rows;
-  }, [classificationModels, mlQuery.data?.regression?.models]);
+  }, [classificationRows, regressionRows]);
 
-  const rocData = useMemo(() => {
-    const fprPoints = Array.from({ length: 21 }, (_, idx) => idx / 20);
-    const curves = Object.fromEntries(
-      Object.entries(classificationModels).map(([name, model]) => [name, buildCurve(model)]),
-    );
+  const plotRows = useMemo(
+    () => extractModelRows((classificationPlots ?? emptyClassification) as Record<string, unknown>),
+    [classificationPlots],
+  );
 
-    return fprPoints.map((fpr) => {
-      const row: Record<string, number> = { fpr, random: fpr };
-      for (const [name, curve] of Object.entries(curves)) {
-        row[name] = interpolateTpr(curve, fpr);
-      }
-      return row;
-    });
-  }, [classificationModels]);
+  useEffect(() => {
+    if (!plotRows.length) {
+      return;
+    }
+    const exists = plotRows.some((row) => row.key === selectedPlotModel);
+    if (!exists) {
+      setSelectedPlotModel(plotRows[0].key);
+    }
+  }, [plotRows, selectedPlotModel]);
+
+  const selectedPlot = useMemo(() => {
+    if (!plotRows.length) {
+      return undefined;
+    }
+    return plotRows.find((row) => row.key === selectedPlotModel) ?? plotRows[0];
+  }, [plotRows, selectedPlotModel]);
+
+  const bestAccuracy = useMemo(() => {
+    const values = classificationRows
+      .map((row) => toNumber(row.metrics.accuracy))
+      .filter((value): value is number => value !== undefined);
+    return values.length ? Math.max(...values) : undefined;
+  }, [classificationRows]);
 
   const clusterScatterData = useMemo(() => {
     const kmeans = clustersQuery.data?.kmeans?.cluster_labels ?? [];
@@ -180,19 +258,35 @@ export default function MlModelsPage() {
     return rows;
   }, [clustersQuery.data?.agglomerative?.cluster_labels, clustersQuery.data?.kmeans?.cluster_labels]);
 
-  const isLoading = mlQuery.isLoading || clustersQuery.isLoading;
-  const error = mlQuery.error ?? clustersQuery.error;
+  const clusterPlotB64 = useMemo(() => {
+    const data = clustersQuery.data as unknown as {
+      pca_scatter_b64?: string;
+      pca_scatter_plot?: string;
+    };
+    return data?.pca_scatter_b64 ?? data?.pca_scatter_plot;
+  }, [clustersQuery.data]);
 
-  const bestAccuracy = useMemo(() => {
-    const values = Object.values(classificationModels)
-      .map((model) => model.metrics?.accuracy)
-      .filter((value): value is number => value !== undefined);
-    return values.length ? Math.max(...values) : undefined;
-  }, [classificationModels]);
+  const isLoading = summaryQuery.isLoading || clustersQuery.isLoading;
+  const error = summaryQuery.error ?? clustersQuery.error;
+  const notTrained = summaryQuery.data?.status === "not_trained";
 
-  const toggleModelVisibility = (name: string) => {
-    setHiddenModels((prev) => ({ ...prev, [name]: !prev[name] }));
-  };
+  const handleLoadVisualizations = useCallback(async () => {
+    setPlotsVisible(true);
+    if (classificationPlots || plotsLoading) {
+      return;
+    }
+
+    setPlotsError(null);
+    setPlotsLoading(true);
+    try {
+      await fetchPlots();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to load classification visualizations.";
+      setPlotsError(message);
+    } finally {
+      setPlotsLoading(false);
+    }
+  }, [classificationPlots, fetchPlots, plotsLoading]);
 
   return (
     <section className="space-y-8">
@@ -200,27 +294,33 @@ export default function MlModelsPage() {
         <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--brand-blue)]">Module 02</p>
         <h2 className="text-3xl font-bold text-slate-900">Machine Learning Models</h2>
         <p className="text-sm text-slate-600">
-          Side-by-side model diagnostics with ROC behavior, confusion matrices, and clustering outputs.
+          Summary metrics load first via /ml/results/summary. Visualizations are fetched on demand.
         </p>
       </header>
 
-      {isLoading ? <LoadingSpinner label="Loading ML diagnostics" /> : null}
+      {isLoading ? <LoadingSpinner label="Loading ML summary" /> : null}
       {error ? <ErrorBanner message={error instanceof Error ? error.message : "Failed to load ML data."} /> : null}
 
-      {!isLoading && !error ? (
+      {!isLoading && !error && notTrained ? (
+        <article className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-600">
+          Models are not trained yet. Run POST /ml/train to generate cached ML artifacts.
+        </article>
+      ) : null}
+
+      {!isLoading && !error && !notTrained ? (
         <>
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <MetricCard
               title="Classification Models"
-              value={String(modelNames.length)}
-              subtitle="Models included in /ml/results"
+              value={String(classificationRows.length)}
+              subtitle="From /ml/results/summary"
               accent="blue"
               delayMs={0}
             />
             <MetricCard
               title="Best Accuracy"
               value={bestAccuracy !== undefined ? `${(bestAccuracy * 100).toFixed(1)}%` : "--"}
-              subtitle="Top observed classification score"
+              subtitle="Top classification score"
               accent="teal"
               delayMs={70}
             />
@@ -242,7 +342,7 @@ export default function MlModelsPage() {
 
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <h3 className="text-lg font-semibold text-slate-900">Model Comparison Table</h3>
-            <p className="mt-1 text-sm text-slate-500">Classification and regression metrics in a unified layout.</p>
+            <p className="mt-1 text-sm text-slate-500">Lightweight numbers from /ml/results/summary only.</p>
 
             <div className="mt-4 overflow-x-auto">
               <table className="min-w-full border-collapse text-sm">
@@ -279,121 +379,117 @@ export default function MlModelsPage() {
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h3 className="text-lg font-semibold text-slate-900">Interactive ROC Overlay</h3>
-                <p className="mt-1 text-sm text-slate-500">Toggle model lines to inspect discrimination tradeoffs.</p>
+                <h3 className="text-lg font-semibold text-slate-900">Classification Visualizations</h3>
+                <p className="mt-1 text-sm text-slate-500">
+                  Heavy base64 images are fetched only when requested.
+                </p>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                {modelNames.map((name, idx) => {
-                  const hidden = hiddenModels[name];
-                  return (
-                    <button
-                      key={name}
-                      type="button"
-                      onClick={() => toggleModelVisibility(name)}
-                      className="rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.1em]"
-                      style={{
-                        borderColor: linePalette[idx % linePalette.length],
-                        color: hidden ? "#64748b" : linePalette[idx % linePalette.length],
-                        opacity: hidden ? 0.6 : 1,
-                      }}
-                    >
-                      {hidden ? `Show ${name}` : `Hide ${name}`}
-                    </button>
-                  );
-                })}
-              </div>
+              <button
+                type="button"
+                onClick={handleLoadVisualizations}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                disabled={plotsLoading}
+              >
+                {classificationPlots ? "Visualizations Loaded" : plotsLoading ? "Loading..." : "Load Visualizations"}
+              </button>
             </div>
+
+            {plotsVisible && plotsLoading ? <LoadingSpinner label="Loading classification plots" /> : null}
+            {plotsVisible && plotsError ? <ErrorBanner message={plotsError} /> : null}
+
+            {plotsVisible && !plotsLoading && !plotsError && classificationPlots ? (
+              <div className="mt-4 space-y-5">
+                <div className="flex flex-wrap items-center gap-3">
+                  <label htmlFor="plot-model" className="text-sm font-medium text-slate-700">
+                    Model
+                  </label>
+                  <select
+                    id="plot-model"
+                    value={selectedPlot?.key ?? ""}
+                    onChange={(event) => setSelectedPlotModel(event.target.value)}
+                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700"
+                  >
+                    {plotRows.map((row) => (
+                      <option key={row.key} value={row.key}>
+                        {row.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <article className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <h4 className="text-sm font-semibold uppercase tracking-[0.12em] text-slate-600">Confusion Matrix</h4>
+                    {selectedPlot?.metrics.confusion_matrix_b64 ? (
+                      <Image
+                        src={`data:image/png;base64,${selectedPlot.metrics.confusion_matrix_b64}`}
+                        alt={`${selectedPlot.label} confusion matrix`}
+                        width={980}
+                        height={640}
+                        unoptimized
+                        className="mt-3 h-auto w-full rounded-xl border border-slate-100"
+                      />
+                    ) : (
+                      <p className="mt-3 text-sm text-slate-500">No confusion matrix image available.</p>
+                    )}
+                  </article>
+
+                  <article className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <h4 className="text-sm font-semibold uppercase tracking-[0.12em] text-slate-600">ROC Curve</h4>
+                    {selectedPlot?.metrics.roc_curve_b64 ? (
+                      <Image
+                        src={`data:image/png;base64,${selectedPlot.metrics.roc_curve_b64}`}
+                        alt={`${selectedPlot.label} ROC curve`}
+                        width={980}
+                        height={640}
+                        unoptimized
+                        className="mt-3 h-auto w-full rounded-xl border border-slate-100"
+                      />
+                    ) : (
+                      <p className="mt-3 text-sm text-slate-500">No ROC curve image available.</p>
+                    )}
+                  </article>
+                </div>
+
+                <PlotViewer
+                  title="ROC Overlay"
+                  description="Combined ROC overlay from /ml/results/classification"
+                  imageBase64={classificationPlots.roc_overlay_b64 as string | undefined}
+                  downloadFileName="ml-roc-overlay.png"
+                  delayMs={30}
+                />
+              </div>
+            ) : null}
+          </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h3 className="text-lg font-semibold text-slate-900">Cluster Label Scatter</h3>
+            <p className="mt-1 text-sm text-slate-500">Sample-index cluster view for KMeans vs Agglomerative labels.</p>
 
             <div className="mt-4 h-80 w-full">
               <ResponsiveContainer>
-                <LineChart data={rocData} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+                <ScatterChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis type="number" dataKey="fpr" domain={[0, 1]} tickFormatter={(value) => value.toFixed(1)} />
-                  <YAxis type="number" domain={[0, 1]} tickFormatter={(value) => value.toFixed(1)} />
-                  <Tooltip formatter={(value: number) => value.toFixed(3)} />
+                  <XAxis type="number" dataKey="sample" name="Sample" />
+                  <YAxis type="number" dataKey="kmeans" name="Cluster" allowDecimals={false} />
+                  <Tooltip />
                   <Legend />
-                  <Line type="monotone" dataKey="random" name="Random" stroke="#94a3b8" strokeDasharray="5 5" dot={false} />
-                  {modelNames.map((name, idx) =>
-                    hiddenModels[name] ? null : (
-                      <Line
-                        key={name}
-                        type="monotone"
-                        dataKey={name}
-                        stroke={linePalette[idx % linePalette.length]}
-                        dot={false}
-                        strokeWidth={2}
-                      />
-                    ),
-                  )}
-                </LineChart>
+                  <Scatter name="KMeans" data={clusterScatterData} fill="#2e75b6" />
+                  <Scatter
+                    name="Agglomerative"
+                    data={clusterScatterData.map((row) => ({ ...row, kmeans: row.agglomerative }))}
+                    fill="#be123c"
+                  />
+                </ScatterChart>
               </ResponsiveContainer>
             </div>
-          </section>
-
-          <section className="grid gap-4 lg:grid-cols-2">
-            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-lg font-semibold text-slate-900">Confusion Matrix Viewer</h3>
-                  <p className="mt-1 text-sm text-slate-500">Select a model to inspect matrix diagnostics.</p>
-                </div>
-
-                <select
-                  value={selectedModelName}
-                  onChange={(event) => setSelectedConfusionModel(event.target.value)}
-                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700"
-                >
-                  {modelNames.map((name) => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {selectedModel?.confusion_matrix_plot ? (
-                <Image
-                  src={`data:image/png;base64,${selectedModel.confusion_matrix_plot}`}
-                  alt={`${selectedModelName} confusion matrix`}
-                  width={980}
-                  height={640}
-                  unoptimized
-                  className="mt-4 h-auto w-full rounded-xl border border-slate-100"
-                />
-              ) : (
-                <p className="mt-4 text-sm text-slate-500">No confusion-matrix image available for the selected model.</p>
-              )}
-            </article>
-
-            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-              <h3 className="text-lg font-semibold text-slate-900">Cluster Label Scatter</h3>
-              <p className="mt-1 text-sm text-slate-500">Sample-index cluster view for KMeans vs Agglomerative labels.</p>
-
-              <div className="mt-4 h-80 w-full">
-                <ResponsiveContainer>
-                  <ScatterChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis type="number" dataKey="sample" name="Sample" />
-                    <YAxis type="number" dataKey="kmeans" name="Cluster" allowDecimals={false} />
-                    <Tooltip />
-                    <Legend />
-                    <Scatter name="KMeans" data={clusterScatterData} fill="#2e75b6" />
-                    <Scatter
-                      name="Agglomerative"
-                      data={clusterScatterData.map((row) => ({ ...row, kmeans: row.agglomerative }))}
-                      fill="#be123c"
-                    />
-                  </ScatterChart>
-                </ResponsiveContainer>
-              </div>
-            </article>
           </section>
 
           <PlotViewer
             title="PCA Cluster Scatter Plot"
             description="Backend-rendered PCA scatter from /ml/clusters"
-            imageBase64={clustersQuery.data?.pca_scatter_plot}
+            imageBase64={clusterPlotB64}
             downloadFileName="ml-clusters-pca.png"
             delayMs={50}
           />

@@ -50,7 +50,8 @@ Thumbs.db
 *.db
 
 # Trained model artifacts
-/models/
+models/
+data/
 
 # -----------------------------
 # Large datasets (do not commit)

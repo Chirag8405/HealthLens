@@ -391,7 +391,11 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         "regression", train_and_evaluate_regression, csv_path=csv_path, models_dir=models_dir
     )
     classification_summary, timer_cls = _time_call(
-        "classification", train_and_evaluate_classification, csv_path=csv_path, models_dir=models_dir
+        "classification",
+        train_and_evaluate_classification,
+        csv_path=csv_path,
+        models_dir=models_dir,
+        skip_svm=args.skip_svm,
     )
     ann_summary, timer_ann = _time_call("ann", train_and_evaluate_ann, csv_path=csv_path, models_dir=models_dir)
     cnn_summary, timer_cnn = _time_call(
@@ -494,6 +498,11 @@ def parse_args() -> argparse.Namespace:
         "--report-only",
         action="store_true",
         help="Only regenerate model_report.md from an existing results_summary.json file.",
+    )
+    parser.add_argument(
+        "--skip-svm",
+        action="store_true",
+        help="Skip SVM during classification training to reduce CPU runtime.",
     )
     return parser.parse_args()
 

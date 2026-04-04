@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import base64
+import gc
 import json
-import os
+import time
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import joblib
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_selection import VarianceThreshold
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import confusion_matrix
@@ -22,15 +26,11 @@ from sklearn.metrics import precision_score
 from sklearn.metrics import recall_score
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import roc_curve
-from sklearn.model_selection import GridSearchCV
-from sklearn.model_selection import cross_val_score
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.feature_selection import VarianceThreshold
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
-from threadpoolctl import threadpool_limits
 
 from ml.data_utils import default_csv_path
 from ml.data_utils import prepare_modeling_dataframe
@@ -48,7 +48,7 @@ def _to_base64_png() -> str:
 
 
 def _confusion_matrix_plot(cm: np.ndarray, model_name: str) -> str:
-    plt.figure(figsize=(10,6))
+    plt.figure(figsize=(10, 6))
     sns.heatmap(
         cm,
         annot=True,
@@ -63,15 +63,30 @@ def _confusion_matrix_plot(cm: np.ndarray, model_name: str) -> str:
     return _to_base64_png()
 
 
+def _single_roc_curve_plot(fpr: np.ndarray, tpr: np.ndarray, auc: float | None, model_name: str) -> str:
+    plt.figure(figsize=(10, 6))
+    label = f"{model_name}"
+    if auc is not None:
+        label = f"{model_name} (AUC={auc:.3f})"
+    plt.plot(fpr, tpr, linewidth=2, label=label)
+    plt.plot([0, 1], [0, 1], "k--", linewidth=1.5, label="Random")
+    plt.title(f"ROC Curve - {model_name}")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.legend(loc="lower right")
+    return _to_base64_png()
+
+
 def _roc_overlay_plot(roc_data: dict[str, dict[str, Any]]) -> str:
-    plt.figure(figsize=(10,6))
+    plt.figure(figsize=(10, 6))
     for model_name, data in roc_data.items():
         fpr = data["fpr"]
         tpr = data["tpr"]
         auc = data["auc"]
-        if auc is None:
-            continue
-        plt.plot(fpr, tpr, linewidth=2, label=f"{model_name} (AUC={auc:.3f})")
+        label = f"{model_name}"
+        if auc is not None:
+            label = f"{model_name} (AUC={auc:.3f})"
+        plt.plot(fpr, tpr, linewidth=2, label=label)
 
     plt.plot([0, 1], [0, 1], "k--", linewidth=1.5, label="Random")
     plt.title("ROC Curve Comparison")
@@ -85,43 +100,77 @@ def _default_models_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "models"
 
 
-def _safe_auc(y_true: np.ndarray, y_proba: np.ndarray) -> float | None:
+def _safe_auc(y_true: np.ndarray, y_score: np.ndarray | None) -> float | None:
+    if y_score is None:
+        return None
     try:
-        return float(roc_auc_score(y_true, y_proba))
+        return float(roc_auc_score(y_true, y_score))
     except ValueError:
         return None
 
 
-def _subsample_train(
-    X: np.ndarray,
-    y: np.ndarray,
-    max_samples: int | None,
-    random_state: int = 42,
-) -> tuple[np.ndarray, np.ndarray]:
-    if max_samples is None or max_samples <= 0 or y.shape[0] <= max_samples:
-        return X, y
+def _evaluate_model(
+    model: Any,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    model_name: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    y_pred = model.predict(X_test)
 
-    X_sub, _, y_sub, _ = train_test_split(
-        X,
-        y,
-        train_size=max_samples,
-        random_state=random_state,
-        stratify=y,
-    )
-    return X_sub, y_sub
+    y_score: np.ndarray | None = None
+    if hasattr(model, "predict_proba"):
+        y_score = model.predict_proba(X_test)[:, 1]
+    elif hasattr(model, "decision_function"):
+        y_score = np.asarray(model.decision_function(X_test), dtype=float)
+
+    accuracy = float(accuracy_score(y_test, y_pred))
+    precision = float(precision_score(y_test, y_pred, average="weighted", zero_division=0))
+    recall = float(recall_score(y_test, y_pred, average="weighted", zero_division=0))
+    f1 = float(f1_score(y_test, y_pred, average="weighted", zero_division=0))
+    auc = _safe_auc(y_test, y_score)
+
+    cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
+    confusion_matrix_b64 = _confusion_matrix_plot(cm, model_name)
+
+    roc_curve_b64 = ""
+    roc_overlay_data: dict[str, Any] | None = None
+    if y_score is not None:
+        fpr, tpr, _ = roc_curve(y_test, y_score)
+        roc_curve_b64 = _single_roc_curve_plot(fpr, tpr, auc, model_name)
+        roc_overlay_data = {
+            "fpr": fpr,
+            "tpr": tpr,
+            "auc": auc,
+        }
+
+    result = {
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "auc": auc,
+        "confusion_matrix": [[int(x) for x in row] for row in cm.tolist()],
+        "confusion_matrix_b64": confusion_matrix_b64,
+        "roc_curve_b64": roc_curve_b64,
+    }
+    return result, roc_overlay_data
 
 
 def train_and_evaluate_classification(
     csv_path: str | Path | None = None,
     models_dir: str | Path | None = None,
+    skip_svm: bool = False,
     profile: str | None = None,
     n_jobs: int | None = None,
     cv_folds: int | None = None,
     max_search_samples: int | None = None,
     max_svc_samples: int | None = None,
 ) -> dict[str, Any]:
+    del profile, n_jobs, cv_folds, max_search_samples, max_svc_samples
+
     csv_path = Path(csv_path) if csv_path is not None else default_csv_path()
     models_dir = Path(models_dir) if models_dir is not None else _default_models_dir()
+    models_dir.mkdir(parents=True, exist_ok=True)
 
     classification_dir = models_dir / "classification"
     classification_dir.mkdir(parents=True, exist_ok=True)
@@ -130,7 +179,11 @@ def train_and_evaluate_classification(
     if "readmitted_30" not in df.columns:
         raise KeyError("Target column 'readmitted_30' not found after preprocessing.")
 
-    drop_cols = [col for col in ("readmitted_30", "readmitted", "encounter_id", "patient_nbr") if col in df.columns]
+    drop_cols = [
+        col
+        for col in ("readmitted_30", "readmitted", "encounter_id", "patient_nbr")
+        if col in df.columns
+    ]
     X = df.drop(columns=drop_cols)
     y = df["readmitted_30"].astype(int)
 
@@ -142,190 +195,181 @@ def train_and_evaluate_classification(
         stratify=y,
     )
 
-    y_train_np = y_train.to_numpy()
-
-    effective_profile = (profile or os.getenv("HEALTHLENS_CLASSIFICATION_PROFILE", "safe")).strip().lower()
-    if effective_profile not in {"safe", "full"}:
-        effective_profile = "safe"
-
-    if n_jobs is None:
-        n_jobs = 1 if effective_profile == "safe" else -1
-    if cv_folds is None:
-        cv_folds = 3 if effective_profile == "safe" else 5
-    if max_search_samples is None and effective_profile == "safe":
-        max_search_samples = 8_000
-    if max_svc_samples is None and effective_profile == "safe":
-        max_svc_samples = 6_000
-
-    logistic_grid = {"C": [0.1, 1.0, 10.0]} if effective_profile == "safe" else {"C": [0.01, 0.1, 1.0, 10.0]}
-    tree_depths = [4, 8, 12] if effective_profile == "safe" else list(range(3, 11))
-    svc_grid = {"C": [0.5, 1.0], "gamma": ["scale"]} if effective_profile == "safe" else {
-        "C": [0.1, 1.0, 10.0],
-        "gamma": ["scale"],
-    }
-    k_values = list(range(3, 10, 2)) if effective_profile == "safe" else list(range(3, 16))
-    rf_estimators = 120 if effective_profile == "safe" else 200
-
-    thread_limit = 1 if n_jobs == 1 else None
-
-    # 1. Fit variance selector on raw full train and transform raw train/test.
     X_train_raw = X_train.to_numpy(dtype=np.float64)
     X_test_raw = X_test.to_numpy(dtype=np.float64)
+    y_train_np = y_train.to_numpy()
+    y_test_np = y_test.to_numpy()
 
     selector = VarianceThreshold(threshold=0.009)
     X_train_reduced = selector.fit_transform(X_train_raw)
     X_test_reduced = selector.transform(X_test_raw)
     joblib.dump(selector, classification_dir / "variance_selector.pkl")
-    n_features_after = int(X_train_reduced.shape[1])
-    print(f"Features after variance filter: {n_features_after}")
 
-    # 2. Scale reduced features only.
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train_reduced)
     X_test_scaled = scaler.transform(X_test_reduced)
-
-    # 3. Subsample from reduced feature arrays.
-    X_search_scaled, y_search = _subsample_train(X_train_scaled, y_train_np, max_search_samples)
-    X_svc_scaled, y_svc = _subsample_train(X_train_scaled, y_train_np, max_svc_samples)
-
     joblib.dump(scaler, classification_dir / "scaler.pkl")
+
     with (classification_dir / "feature_names.json").open("w", encoding="utf-8") as fp:
         json.dump(X.columns.tolist(), fp, indent=2)
 
-    with threadpool_limits(limits=thread_limit):
-        print("Starting LogisticRegression GridSearch...")
-        logistic_search = GridSearchCV(
-            estimator=LogisticRegression(max_iter=1000, solver="liblinear"),
-            param_grid=logistic_grid,
-            scoring="f1_weighted",
-            cv=cv_folds,
-            n_jobs=n_jobs,
-        )
-        logistic_search.fit(X_search_scaled, y_search)
+    results_payload: dict[str, Any] = {}
+    legacy_models: dict[str, dict[str, Any]] = {}
+    roc_overlay_data: dict[str, dict[str, Any]] = {}
 
-        print("Starting DecisionTree GridSearch...")
-        tree_search = GridSearchCV(
-            estimator=DecisionTreeClassifier(random_state=42),
-            param_grid={"max_depth": tree_depths},
-            scoring="f1_weighted",
-            cv=cv_folds,
-            n_jobs=n_jobs,
-        )
-        tree_search.fit(X_search_scaled, y_search)
-
-        print("Starting KNN search...")
-        best_k = 3
-        best_k_score = -np.inf
-        for k in k_values:
-            knn = KNeighborsClassifier(n_neighbors=k)
-            cv_scores = cross_val_score(
-                knn,
-                X_search_scaled,
-                y_search,
-                cv=cv_folds,
-                scoring="f1_weighted",
-                n_jobs=n_jobs,
-            )
-            score = float(np.mean(cv_scores))
-            if score > best_k_score:
-                best_k_score = score
-                best_k = k
-
-        knn_model = KNeighborsClassifier(n_neighbors=best_k)
-        if effective_profile == "safe":
-            knn_model.fit(X_search_scaled, y_search)
-        else:
-            knn_model.fit(X_train_scaled, y_train_np)
-
-        print("Starting SVC GridSearch...")
-        svc_search = GridSearchCV(
-            estimator=SVC(kernel="rbf", probability=True, random_state=42),
-            param_grid=svc_grid,
-            scoring="f1_weighted",
-            cv=cv_folds,
-            n_jobs=n_jobs,
-        )
-        svc_search.fit(X_svc_scaled, y_svc)
-
-        print("Starting RandomForest fit...")
-        random_forest = RandomForestClassifier(
-            n_estimators=rf_estimators,
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=n_jobs,
-        )
-        random_forest.fit(X_search_scaled, y_search)
-
-    print("All models trained. Computing test metrics...")
-
-    trained_models: dict[str, tuple[Any, dict[str, Any]]] = {
-        "LogisticRegression": (logistic_search.best_estimator_, logistic_search.best_params_),
-        "DecisionTreeClassifier": (tree_search.best_estimator_, tree_search.best_params_),
-        "RandomForestClassifier": (
-            random_forest,
-            {"n_estimators": rf_estimators, "class_weight": "balanced"},
+    ordered_models: list[tuple[str, str, Any]] = [
+        (
+            "logistic_regression",
+            "LogisticRegression",
+            LogisticRegression(max_iter=1000, solver="liblinear"),
         ),
-        "KNeighborsClassifier": (knn_model, {"n_neighbors": best_k}),
-        "SVC": (svc_search.best_estimator_, svc_search.best_params_),
-    }
+        (
+            "decision_tree",
+            "DecisionTreeClassifier",
+            DecisionTreeClassifier(random_state=42),
+        ),
+        (
+            "knn",
+            "KNeighborsClassifier",
+            KNeighborsClassifier(n_neighbors=7),
+        ),
+        (
+            "random_forest",
+            "RandomForestClassifier",
+            RandomForestClassifier(
+                n_estimators=100,
+                max_depth=15,
+                min_samples_leaf=4,
+                n_jobs=1,
+                class_weight="balanced",
+                random_state=42,
+            ),
+        ),
+    ]
 
-    model_results: dict[str, dict[str, Any]] = {}
-    roc_data: dict[str, dict[str, Any]] = {}
+    total_models = len(ordered_models) + (0 if skip_svm else 1)
 
-    for model_name, (model, params) in trained_models.items():
-        y_pred = model.predict(X_test_scaled)
-        y_proba = model.predict_proba(X_test_scaled)[:, 1]
+    for i, (result_key, legacy_name, estimator) in enumerate(ordered_models, start=1):
+        print(f"[{i}/{total_models}] Training {legacy_name}...", flush=True)
+        started_at = time.perf_counter()
 
-        accuracy = float(accuracy_score(y_test, y_pred))
-        precision = float(precision_score(y_test, y_pred, average="weighted", zero_division=0))
-        recall = float(recall_score(y_test, y_pred, average="weighted", zero_division=0))
-        f1 = float(f1_score(y_test, y_pred, average="weighted", zero_division=0))
-        auc = _safe_auc(y_test.to_numpy(), y_proba)
-
-        cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
-        cm_plot_b64 = _confusion_matrix_plot(cm, model_name)
-
-        fpr, tpr, _ = roc_curve(y_test, y_proba)
-        roc_data[model_name] = {
-            "fpr": fpr,
-            "tpr": tpr,
-            "auc": auc,
-        }
-
-        model_filename = model_name.lower().replace(" ", "_") + ".joblib"
+        model = estimator.fit(X_train_scaled, y_train_np)
+        model_filename = f"{model.__class__.__name__.lower()}.joblib"
         joblib.dump(model, classification_dir / model_filename)
 
-        model_results[model_name] = {
-            "model_name": model_name,
-            "best_params": params,
+        metrics, roc_data = _evaluate_model(model, X_test_scaled, y_test_np, legacy_name)
+        results_payload[result_key] = metrics
+        legacy_models[legacy_name] = {
+            "model_name": legacy_name,
+            "best_params": {},
             "metrics": {
-                "accuracy": accuracy,
-                "precision": precision,
-                "recall": recall,
-                "f1_weighted": f1,
-                "auc_roc": auc,
+                "accuracy": metrics["accuracy"],
+                "precision": metrics["precision"],
+                "recall": metrics["recall"],
+                "f1_weighted": metrics["f1"],
+                "auc_roc": metrics["auc"],
             },
-            "confusion_matrix_plot": cm_plot_b64,
+            "confusion_matrix_plot": metrics["confusion_matrix_b64"],
         }
 
-    roc_plot_b64 = _roc_overlay_plot(roc_data)
+        if roc_data is not None and metrics["auc"] is not None:
+            roc_overlay_data[legacy_name] = roc_data
 
-    summary: dict[str, Any] = {
+        elapsed = time.perf_counter() - started_at
+        print(
+            f"[{i}/{total_models}] {legacy_name} done - {elapsed:.1f}s | "
+            f"accuracy={metrics['accuracy']:.3f} f1={metrics['f1']:.3f}",
+            flush=True,
+        )
+
+        del model
+        gc.collect()
+        print(f"[ml/train] {legacy_name} done, memory freed")
+
+    if not skip_svm:
+        i = total_models
+        print(f"[{i}/{total_models}] Training SVC...", flush=True)
+        started_at = time.perf_counter()
+
+        if X_train_scaled.shape[0] > 50_000:
+            rng = np.random.default_rng(42)
+            idx = rng.choice(X_train_scaled.shape[0], 50_000, replace=False)
+            X_svm = X_train_scaled[idx]
+            y_svm = y_train_np[idx]
+        else:
+            X_svm, y_svm = X_train_scaled, y_train_np
+
+        svm_model = SVC(
+            kernel="rbf",
+            C=1.0,
+            gamma="scale",
+            probability=True,
+            cache_size=500,
+            max_iter=1000,
+        ).fit(X_svm, y_svm)
+        joblib.dump(svm_model, classification_dir / "svc.joblib")
+
+        svm_metrics, svm_roc_data = _evaluate_model(svm_model, X_test_scaled, y_test_np, "SVC")
+        results_payload["svm"] = svm_metrics
+        legacy_models["SVC"] = {
+            "model_name": "SVC",
+            "best_params": {
+                "kernel": "rbf",
+                "C": 1.0,
+                "gamma": "scale",
+                "cache_size": 500,
+                "max_iter": 1000,
+                "train_rows": int(X_svm.shape[0]),
+            },
+            "metrics": {
+                "accuracy": svm_metrics["accuracy"],
+                "precision": svm_metrics["precision"],
+                "recall": svm_metrics["recall"],
+                "f1_weighted": svm_metrics["f1"],
+                "auc_roc": svm_metrics["auc"],
+            },
+            "confusion_matrix_plot": svm_metrics["confusion_matrix_b64"],
+        }
+
+        if svm_roc_data is not None and svm_metrics["auc"] is not None:
+            roc_overlay_data["SVC"] = svm_roc_data
+
+        elapsed = time.perf_counter() - started_at
+        print(
+            f"[{i}/{total_models}] SVC done - {elapsed:.1f}s | "
+            f"accuracy={svm_metrics['accuracy']:.3f} f1={svm_metrics['f1']:.3f}",
+            flush=True,
+        )
+
+        del svm_model
+        gc.collect()
+        print("[ml/train] SVC done, memory freed")
+    else:
+        print("[ml/train] SVC skipped (--skip-svm enabled)", flush=True)
+
+    roc_overlay_b64 = _roc_overlay_plot(roc_overlay_data)
+
+    results_payload["roc_overlay_b64"] = roc_overlay_b64
+    results_payload["meta"] = {
+        "train_rows": int(X_train.shape[0]),
+        "test_rows": int(X_test.shape[0]),
+        "n_features_after_variance": int(X_train_scaled.shape[1]),
+    }
+    results_payload["trained_at"] = datetime.now().isoformat()
+
+    with (models_dir / "ml_results.json").open("w", encoding="utf-8") as fp:
+        json.dump(results_payload, fp)
+
+    legacy_summary: dict[str, Any] = {
         "task": "classification",
         "target": "readmitted_30",
         "train_shape": [int(X_train.shape[0]), int(X_train.shape[1])],
         "test_shape": [int(X_test.shape[0]), int(X_test.shape[1])],
-        "training_profile": effective_profile,
-        "search_train_samples": int(X_search_scaled.shape[0]),
-        "svc_train_samples": int(X_svc_scaled.shape[0]),
-        "cv_folds": int(cv_folds),
-        "n_jobs": int(n_jobs),
-        "n_features_after_variance": n_features_after,
-        "models": model_results,
-        "roc_curve_plot": roc_plot_b64,
+        "models": legacy_models,
+        "roc_curve_plot": roc_overlay_b64,
     }
 
     with (classification_dir / "results.json").open("w", encoding="utf-8") as fp:
-        json.dump(summary, fp)
+        json.dump(legacy_summary, fp)
 
-    return summary
+    return legacy_summary

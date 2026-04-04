@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import base64
+import gc
 import json
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import joblib
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -36,7 +39,7 @@ def _to_base64_png() -> str:
 
 
 def _actual_vs_predicted_plot(y_true: np.ndarray, y_pred: np.ndarray, model_name: str) -> str:
-    plt.figure(figsize=(10,6))
+    plt.figure(figsize=(10, 6))
     plt.scatter(y_true, y_pred, alpha=0.35, color="#2563eb", edgecolors="none")
 
     min_value = float(min(np.min(y_true), np.min(y_pred)))
@@ -59,6 +62,7 @@ def train_and_evaluate_regression(
 ) -> dict[str, Any]:
     csv_path = Path(csv_path) if csv_path is not None else default_csv_path()
     models_dir = Path(models_dir) if models_dir is not None else _default_models_dir()
+    models_dir.mkdir(parents=True, exist_ok=True)
 
     regression_dir = models_dir / "regression"
     regression_dir.mkdir(parents=True, exist_ok=True)
@@ -95,6 +99,14 @@ def train_and_evaluate_regression(
     }
 
     model_results: dict[str, dict[str, Any]] = {}
+    regression_payload: dict[str, Any] = {}
+
+    api_key_map = {
+        "LinearRegression": "linear_regression",
+        "Ridge": "ridge",
+        "Lasso": "lasso",
+    }
+
     for model_name, model in models.items():
         model.fit(X_train_scaled, y_train)
         y_pred = model.predict(X_test_scaled)
@@ -124,6 +136,23 @@ def train_and_evaluate_regression(
             "metrics": metrics,
             "actual_vs_predicted_plot": scatter_plot_b64,
         }
+        regression_payload[api_key_map[model_name]] = {
+            **metrics,
+            "actual_vs_predicted_b64": scatter_plot_b64,
+        }
+
+        del model
+        gc.collect()
+        print(f"[ml/train] {model_name} regression done, memory freed")
+
+    regression_payload["meta"] = {
+        "train_rows": int(X_train.shape[0]),
+        "test_rows": int(X_test.shape[0]),
+    }
+    regression_payload["trained_at"] = datetime.now().isoformat()
+
+    with (models_dir / "regression_results.json").open("w", encoding="utf-8") as fp:
+        json.dump(regression_payload, fp)
 
     summary: dict[str, Any] = {
         "task": "regression",

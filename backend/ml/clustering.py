@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import joblib
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -62,12 +64,17 @@ def run_clustering(
 ) -> dict[str, Any]:
     csv_path = Path(csv_path) if csv_path is not None else default_csv_path()
     models_dir = Path(models_dir) if models_dir is not None else _default_models_dir()
+    models_dir.mkdir(parents=True, exist_ok=True)
 
     clustering_dir = models_dir / "clustering"
     clustering_dir.mkdir(parents=True, exist_ok=True)
 
     df = prepare_modeling_dataframe(csv_path)
-    drop_cols = [col for col in ("readmitted_30", "readmitted", "encounter_id", "patient_nbr") if col in df.columns]
+    drop_cols = [
+        col
+        for col in ("readmitted_30", "readmitted", "encounter_id", "patient_nbr")
+        if col in df.columns
+    ]
 
     X = df.drop(columns=drop_cols)
     feature_names = X.columns.tolist()
@@ -107,6 +114,24 @@ def run_clustering(
         },
         clustering_dir / "agglomerative.joblib",
     )
+
+    clustering_payload: dict[str, Any] = {
+        "n_samples": int(X.shape[0]),
+        "n_features": int(X.shape[1]),
+        "kmeans": {
+            "silhouette_score": kmeans_silhouette,
+            "cluster_labels": [int(x) for x in kmeans_labels.tolist()],
+        },
+        "agglomerative": {
+            "silhouette_score": agg_silhouette,
+            "cluster_labels": [int(x) for x in agg_labels.tolist()],
+        },
+        "pca_scatter_b64": pca_plot_b64,
+        "trained_at": datetime.now().isoformat(),
+    }
+
+    with (models_dir / "clustering_results.json").open("w", encoding="utf-8") as fp:
+        json.dump(clustering_payload, fp)
 
     summary: dict[str, Any] = {
         "task": "clustering",
