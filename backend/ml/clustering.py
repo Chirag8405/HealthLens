@@ -22,6 +22,9 @@ from sklearn.preprocessing import StandardScaler
 from ml.data_utils import default_csv_path
 from ml.data_utils import prepare_modeling_dataframe
 
+MAX_CLUSTER_SAMPLES = 15000
+MAX_CLUSTER_FEATURES = 600
+
 
 def _to_base64_png() -> str:
     buffer = BytesIO()
@@ -70,17 +73,32 @@ def run_clustering(
     clustering_dir.mkdir(parents=True, exist_ok=True)
 
     df = prepare_modeling_dataframe(csv_path)
+    total_rows = int(df.shape[0])
     drop_cols = [
         col
         for col in ("readmitted_30", "readmitted", "encounter_id", "patient_nbr")
         if col in df.columns
     ]
 
-    X = df.drop(columns=drop_cols)
+    identifier_prefixes = ("encounter_id_", "patient_nbr_")
+    drop_cols.extend([col for col in df.columns if col.startswith(identifier_prefixes)])
+
+    X = df.drop(columns=drop_cols, errors="ignore")
+
+    if X.shape[0] > MAX_CLUSTER_SAMPLES:
+        X = X.sample(n=MAX_CLUSTER_SAMPLES, random_state=42)
+
+    if X.shape[1] > MAX_CLUSTER_FEATURES:
+        # Keep most variant features to avoid exploding memory on high-cardinality one-hot data.
+        variances = X.var(axis=0, numeric_only=True)
+        top_features = variances.nlargest(MAX_CLUSTER_FEATURES).index.tolist()
+        X = X[top_features]
+
+    X = X.astype(np.float32)
     feature_names = X.columns.tolist()
 
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    X_scaled = scaler.fit_transform(X).astype(np.float32)
 
     pca = PCA(n_components=2, random_state=42)
     X_pca = pca.fit_transform(X_scaled)
@@ -133,6 +151,7 @@ def run_clustering(
 
     clustering_payload: dict[str, Any] = {
         "n_samples": int(X.shape[0]),
+        "n_samples_total": total_rows,
         "n_features": int(X.shape[1]),
         "kmeans": {
             "silhouette_score": kmeans_silhouette,
@@ -152,6 +171,7 @@ def run_clustering(
     summary: dict[str, Any] = {
         "task": "clustering",
         "n_samples": int(X.shape[0]),
+        "n_samples_total": total_rows,
         "n_features": int(X.shape[1]),
         "kmeans": {
             "silhouette_score": kmeans_silhouette,

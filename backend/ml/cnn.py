@@ -277,38 +277,17 @@ def generate_gradcam_overlay(
     """
     import cv2
 
-    base_model = _get_base_feature_model(model)
-    conv_model = tf.keras.Model(inputs=model.inputs, outputs=base_model.output)
-
-    base_model_index = model.layers.index(base_model)
-    classifier_input = tf.keras.Input(shape=base_model.output_shape[1:])
-    x = classifier_input
-    for layer in model.layers[base_model_index + 1 :]:
-        x = layer(x)
-    classifier_model = tf.keras.Model(classifier_input, x)
-
-    input_tensor = tf.convert_to_tensor(img_array, dtype=tf.float32)
-    with tf.GradientTape() as tape:
-        conv_outputs = conv_model(input_tensor, training=False)
-        tape.watch(conv_outputs)
-        predictions = classifier_model(conv_outputs, training=False)
-
-        if predictions.shape[-1] == 1:
-            target = predictions[:, 0] if int(pred_class) == 1 else (1.0 - predictions[:, 0])
-        else:
-            target = predictions[:, int(pred_class)]
-
-    grads = tape.gradient(target, conv_outputs)
-    if grads is None:
-        heatmap = np.zeros((IMAGE_SIZE[0], IMAGE_SIZE[1]), dtype=np.float32)
-    else:
-        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-        conv_outputs = conv_outputs[0]
-        heatmap = tf.reduce_sum(conv_outputs * pooled_grads, axis=-1)
-        heatmap = tf.maximum(heatmap, 0)
-        max_value = tf.reduce_max(heatmap)
-        heatmap = tf.where(max_value > 0, heatmap / max_value, heatmap)
-        heatmap = heatmap.numpy()
+    try:
+        base_model = _get_base_feature_model(model)
+        heatmap = make_gradcam_heatmap(
+            preprocessed_img=img_array,
+            model=model,
+            base_model=base_model,
+        )
+    except Exception:
+        # Fallback keeps predictions usable when nested-model graph wiring
+        # prevents explicit Grad-CAM graph construction on loaded models.
+        heatmap = _fallback_input_gradient_heatmap(img_array, model)
 
     heatmap_resized = cv2.resize(heatmap, (IMAGE_SIZE[0], IMAGE_SIZE[1]))
     heatmap_colored = cv2.applyColorMap(np.uint8(255 * np.clip(heatmap_resized, 0.0, 1.0)), cv2.COLORMAP_JET)

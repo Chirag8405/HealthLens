@@ -1,19 +1,33 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 
 import ErrorBanner from "@/components/ErrorBanner";
 import LoadingSpinner from "@/components/LoadingSpinner";
 import RiskBanner from "@/components/RiskBanner";
-import { fetchAPI, postJSON } from "@/lib/api";
-import type { ClusteringResultsResponse } from "@/lib/types";
+import { postJSON } from "@/lib/api";
+
+type TopRiskFactor = {
+  feature: string;
+  value: number;
+  impact: number;
+};
+
+type ClusterCenter = {
+  cluster: number;
+  x: number;
+  y: number;
+  size: number;
+};
 
 type FullPredictionResponse = {
   readmission_risk_30day?: number;
   risk_level?: string;
-  top_risk_factors?: string[];
+  top_risk_factors?: TopRiskFactor[];
   recommendation?: string;
+  patient_cluster?: number;
+  cluster_centers?: ClusterCenter[];
   [key: string]: unknown;
 };
 
@@ -61,45 +75,12 @@ const initialForm: PatientFormState = {
   change: "No",
 };
 
-const factorLabelMap: Record<string, string> = {
-  number_inpatient: "Previous hospital admissions",
-  num_medications: "Number of current medications",
-  number_diagnoses: "Number of active diagnoses",
-  time_in_hospital: "Length of current stay",
-  number_emergency: "Recent emergency visits",
-};
-
-function toSentenceCase(value: string): string {
-  return value
-    .split("_")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
-function resolveRiskBand(score: number | undefined): "low" | "moderate" | "high" {
-  if (score === undefined) {
-    return "moderate";
-  }
-  if (score > 0.6) {
-    return "high";
-  }
-  if (score >= 0.3) {
-    return "moderate";
-  }
-  return "low";
-}
-
 export default function ClinicalPatientPage() {
   const [form, setForm] = useState<PatientFormState>(initialForm);
 
   const predictionMutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) =>
       postJSON<FullPredictionResponse, Record<string, unknown>>("/predict/full", payload),
-  });
-
-  const clustersQuery = useQuery({
-    queryKey: ["clinical-clusters"],
-    queryFn: () => fetchAPI<ClusteringResultsResponse>("/ml/clusters"),
   });
 
   const updateField = <K extends keyof PatientFormState>(key: K, value: PatientFormState[K]) => {
@@ -174,29 +155,29 @@ export default function ClinicalPatientPage() {
   const riskScore = predictionMutation.data?.readmission_risk_30day;
   const riskLevel = predictionMutation.data?.risk_level ?? "";
 
-  const keyFactors = useMemo(() => {
+  const topRiskFactors = useMemo<TopRiskFactor[]>(() => {
     const factors = predictionMutation.data?.top_risk_factors ?? [];
-    return factors.map((factor) => factorLabelMap[factor] ?? toSentenceCase(factor));
+    return factors
+      .filter(
+        (factor): factor is TopRiskFactor =>
+          typeof factor?.feature === "string" &&
+          typeof factor?.value === "number" &&
+          typeof factor?.impact === "number",
+      )
+      .slice(0, 2);
   }, [predictionMutation.data?.top_risk_factors]);
 
-  const estimatedCluster = useMemo(() => {
-    const signal = form.number_inpatient + form.number_emergency + form.number_diagnoses;
-    return (signal % 4) + 1;
-  }, [form.number_diagnoses, form.number_emergency, form.number_inpatient]);
+  const patientCluster = predictionMutation.data?.patient_cluster;
 
   const similarPatientCount = useMemo(() => {
-    const labels = clustersQuery.data?.kmeans?.cluster_labels ?? [];
-    const target = estimatedCluster - 1;
-    return labels.filter((label) => label === target).length;
-  }, [clustersQuery.data?.kmeans?.cluster_labels, estimatedCluster]);
-
-  const riskBand = resolveRiskBand(riskScore);
-  const riskOutcomeText =
-    riskBand === "high"
-      ? "high-risk"
-      : riskBand === "moderate"
-        ? "moderate-risk"
-        : "low-risk";
+    if (typeof patientCluster !== "number") {
+      return 0;
+    }
+    const clusterInfo = predictionMutation.data?.cluster_centers?.find(
+      (center) => center.cluster === patientCluster,
+    );
+    return clusterInfo?.size ?? 0;
+  }, [patientCluster, predictionMutation.data?.cluster_centers]);
 
   return (
     <section className="space-y-7">
@@ -482,23 +463,10 @@ export default function ClinicalPatientPage() {
 
       {predictionMutation.data ? (
         <section className="space-y-4 rounded-2xl border border-emerald-200 bg-white p-6 shadow-sm">
-          <RiskBanner risk_score={riskScore ?? 0} risk_level={riskLevel} />
-
-          <div className="space-y-2">
-            <h3 className="text-base font-semibold text-slate-900">Key factors contributing to this assessment:</h3>
-            {keyFactors.length ? (
-              <ul className="list-disc space-y-1 pl-5 text-sm text-slate-700">
-                {keyFactors.map((factor) => (
-                  <li key={factor}>{factor}</li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-sm text-slate-600">No additional key factors were returned for this patient.</p>
-            )}
-          </div>
+          <RiskBanner risk_score={riskScore ?? 0} risk_level={riskLevel} top_risk_factors={topRiskFactors} />
 
           <p className="rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-700">
-            This patient&apos;s profile is similar to {similarPatientCount.toLocaleString()} other patients with {riskOutcomeText} outcomes.
+            This patient&apos;s profile is similar to {similarPatientCount.toLocaleString()} other patients in the same risk group.
           </p>
 
           <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">

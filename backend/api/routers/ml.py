@@ -17,10 +17,24 @@ router = APIRouter()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MODELS_DIR = PROJECT_ROOT / "models"
+LEGACY_MODELS_DIR = PROJECT_ROOT / "backend" / "models"
 
-CLASSIFICATION_RESULTS_PATH = MODELS_DIR / "ml_results.json"
-REGRESSION_RESULTS_PATH = MODELS_DIR / "regression_results.json"
-CLUSTERING_RESULTS_PATH = MODELS_DIR / "clustering_results.json"
+CLASSIFICATION_RESULTS_PATHS: tuple[Path, ...] = (
+    MODELS_DIR / "ml_results.json",
+    LEGACY_MODELS_DIR / "ml_results.json",
+)
+REGRESSION_RESULTS_PATHS: tuple[Path, ...] = (
+    MODELS_DIR / "regression_results.json",
+    LEGACY_MODELS_DIR / "regression_results.json",
+)
+CLUSTERING_RESULTS_PATHS: tuple[Path, ...] = (
+    MODELS_DIR / "clustering_results.json",
+    LEGACY_MODELS_DIR / "clustering_results.json",
+)
+CLUSTERING_SUMMARY_PATHS: tuple[Path, ...] = (
+    MODELS_DIR / "clustering" / "results.json",
+    LEGACY_MODELS_DIR / "clustering" / "results.json",
+)
 
 
 class TrainRequest(BaseModel):
@@ -33,10 +47,35 @@ def _load_json(path: Path) -> dict[str, Any]:
         return json.load(fp)
 
 
-def _load_required_json(path: Path, detail: str) -> dict[str, Any]:
-    if not path.exists():
+def _first_existing_path(paths: tuple[Path, ...]) -> Path | None:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
+def _load_first_existing_json(paths: tuple[Path, ...]) -> dict[str, Any] | None:
+    existing_path = _first_existing_path(paths)
+    if existing_path is None:
+        return None
+    return _load_json(existing_path)
+
+
+def _load_required_json(paths: tuple[Path, ...], detail: str) -> dict[str, Any]:
+    payload = _load_first_existing_json(paths)
+    if payload is None:
         raise HTTPException(status_code=404, detail=detail)
-    return _load_json(path)
+    return payload
+
+
+def _normalize_clustering_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    normalized.setdefault("task", "clustering")
+
+    if "pca_scatter_plot" not in normalized and "pca_scatter_b64" in normalized:
+        normalized["pca_scatter_plot"] = normalized.get("pca_scatter_b64")
+
+    return normalized
 
 
 def _strip_base64_fields(payload: Any) -> Any:
@@ -85,13 +124,14 @@ def train_models(request: TrainRequest | None = None) -> dict[str, Any]:
 @router.get("/results")
 def get_ml_results() -> dict[str, Any]:
     classification = _load_required_json(
-        CLASSIFICATION_RESULTS_PATH,
+        CLASSIFICATION_RESULTS_PATHS,
         "ML results not found. Run POST /ml/train first.",
     )
 
     regression: dict[str, Any] = {}
-    if REGRESSION_RESULTS_PATH.exists():
-        regression = _load_json(REGRESSION_RESULTS_PATH)
+    regression_payload = _load_first_existing_json(REGRESSION_RESULTS_PATHS)
+    if regression_payload is not None:
+        regression = regression_payload
 
     return {
         "classification": classification,
@@ -102,7 +142,7 @@ def get_ml_results() -> dict[str, Any]:
 @router.get("/results/classification")
 def get_classification_results() -> dict[str, Any]:
     return _load_required_json(
-        CLASSIFICATION_RESULTS_PATH,
+        CLASSIFICATION_RESULTS_PATHS,
         "ML results not found. Run POST /ml/train first.",
     )
 
@@ -110,27 +150,25 @@ def get_classification_results() -> dict[str, Any]:
 @router.get("/results/regression")
 def get_regression_results() -> dict[str, Any]:
     return _load_required_json(
-        REGRESSION_RESULTS_PATH,
+        REGRESSION_RESULTS_PATHS,
         "Regression results not found. Run POST /ml/train first.",
     )
 
 
 @router.get("/results/summary")
 def get_ml_summary() -> dict[str, Any]:
-    classification_exists = CLASSIFICATION_RESULTS_PATH.exists()
-    regression_exists = REGRESSION_RESULTS_PATH.exists()
+    classification = _load_first_existing_json(CLASSIFICATION_RESULTS_PATHS)
+    regression = _load_first_existing_json(REGRESSION_RESULTS_PATHS)
 
-    if not classification_exists and not regression_exists:
+    if classification is None and regression is None:
         return {"status": "not_trained"}
 
     summary: dict[str, Any] = {"status": "trained"}
 
-    if classification_exists:
-        classification = _load_json(CLASSIFICATION_RESULTS_PATH)
+    if classification is not None:
         summary["classification"] = _strip_base64_fields(classification)
 
-    if regression_exists:
-        regression = _load_json(REGRESSION_RESULTS_PATH)
+    if regression is not None:
         summary["regression"] = _strip_base64_fields(regression)
 
     return summary
@@ -138,7 +176,18 @@ def get_ml_summary() -> dict[str, Any]:
 
 @router.get("/clusters")
 def get_clusters() -> dict[str, Any]:
-    return _load_required_json(
-        CLUSTERING_RESULTS_PATH,
-        "Clustering results not found. Run POST /ml/train first.",
-    )
+    clustering_payload = _load_first_existing_json(CLUSTERING_RESULTS_PATHS)
+    if clustering_payload is not None:
+        return _normalize_clustering_payload(clustering_payload)
+
+    summary_payload = _load_first_existing_json(CLUSTERING_SUMMARY_PATHS)
+    if summary_payload is not None:
+        return _normalize_clustering_payload(summary_payload)
+
+    try:
+        generated = run_clustering(csv_path=default_csv_path(), models_dir=MODELS_DIR)
+        return _normalize_clustering_payload(generated)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Clustering failed: {exc}") from exc

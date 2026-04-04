@@ -292,6 +292,24 @@ def _to_float_array(values: Any) -> np.ndarray:
 	return np.array([], dtype=np.float64)
 
 
+def _estimator_float_dtype(estimator: Any) -> np.dtype | None:
+	for attr in ("cluster_centers_", "components_", "mean_", "scale_"):
+		array_like = getattr(estimator, attr, None)
+		if array_like is None:
+			continue
+		arr = np.asarray(array_like)
+		if arr.dtype.kind == "f":
+			return arr.dtype
+	return None
+
+
+def _cast_for_estimator(values: np.ndarray, estimator: Any) -> np.ndarray:
+	target_dtype = _estimator_float_dtype(estimator)
+	if target_dtype is None:
+		return values
+	return np.asarray(values, dtype=target_dtype)
+
+
 def _extract_row_shap_values(raw_shap_values: Any) -> np.ndarray:
 	if isinstance(raw_shap_values, list):
 		if len(raw_shap_values) > 1:
@@ -473,13 +491,16 @@ def _predict_full_internal(request: FullPredictionRequest, artifacts: TabularArt
 	else:
 		X_processed = cluster_vector
 
+	cluster_input = _cast_for_estimator(X_processed, artifacts.clustering_model)
+	pca_input = _cast_for_estimator(X_processed, artifacts.pca_2d)
+
 	patient_cluster = -1
 	if artifacts.clustering_model is not None:
-		patient_cluster = int(artifacts.clustering_model.predict(X_processed)[0])
+		patient_cluster = int(artifacts.clustering_model.predict(cluster_input)[0])
 
 	patient_2d: np.ndarray | None = None
 	if artifacts.pca_2d is not None:
-		patient_2d = artifacts.pca_2d.transform(X_processed)[0]
+		patient_2d = artifacts.pca_2d.transform(pca_input)[0]
 
 	rf_probability = float(artifacts.random_forest_model.predict_proba(rf_scaled)[0, 1])
 	ann_probability = rf_probability
