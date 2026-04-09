@@ -1,7 +1,7 @@
 "use client";
 
 import { DragEvent, FormEvent, useMemo, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import {
   Bar,
   BarChart,
@@ -19,14 +19,18 @@ import ErrorBanner from "@/components/ErrorBanner";
 import LoadingSpinner from "@/components/LoadingSpinner";
 import RiskBanner from "@/components/RiskBanner";
 import XrayViewer from "@/components/XrayViewer";
-import { fetchAPI, postJSON, uploadFile } from "@/lib/api";
-import type { AnnResultsResponse, CnnPredictResponse } from "@/lib/types";
+import { postJSON, uploadFile } from "@/lib/api";
+import type { CnnPredictResponse } from "@/lib/types";
 
 type FullPredictionResponse = {
   readmission_risk_30day?: number;
   risk_level?: string;
-  top_risk_factors?: string[];
-  ann_confidence?: number;
+  top_risk_factors?: Array<{
+    feature: string;
+    value: number;
+    impact: number;
+  }>;
+  ann_confidence?: number | null;
   rf_confidence?: number;
   recommendation?: string;
   patient_cluster?: number;
@@ -113,11 +117,6 @@ export default function ResearchDemoPage() {
   const [xrayFile, setXrayFile] = useState<File | null>(null);
   const [xrayPreview, setXrayPreview] = useState<string>("");
 
-  const annQuery = useQuery({
-    queryKey: ["research-demo-ann"],
-    queryFn: () => fetchAPI<AnnResultsResponse>("/dl/ann"),
-  });
-
   const predictionMutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) =>
       postJSON<FullPredictionResponse, Record<string, unknown>>("/predict/full", payload),
@@ -190,7 +189,9 @@ export default function ResearchDemoPage() {
 
   const shapBars = useMemo(() => {
     const factors = predictionMutation.data?.top_risk_factors ?? [];
-    return factors.map((factor, idx) => ({ factor, value: Number((1 - idx * 0.25).toFixed(2)) }));
+    return factors
+      .filter((factor) => typeof factor?.feature === "string" && typeof factor?.impact === "number")
+      .map((factor) => ({ factor: factor.feature, value: Math.abs(factor.impact) }));
   }, [predictionMutation.data?.top_risk_factors]);
 
   const assignedCluster = useMemo(() => {
@@ -385,18 +386,14 @@ export default function ResearchDemoPage() {
                   <p className="text-xl font-bold text-slate-900">{formatMetric(predictionMutation.data.readmission_risk_30day, 3)}</p>
                 </div>
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-xs uppercase tracking-[0.12em] text-slate-500">Best threshold</p>
-                  <p className="text-xl font-bold text-slate-900">{formatMetric(annQuery.data?.metrics?.best_threshold, 3)}</p>
-                </div>
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-xs uppercase tracking-[0.12em] text-slate-500">ANN confidence</p>
-                  <p className="text-xl font-bold text-slate-900">{formatMetric(predictionMutation.data.ann_confidence, 3)}</p>
-                </div>
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <p className="text-xs uppercase tracking-[0.12em] text-slate-500">RF confidence</p>
                   <p className="text-xl font-bold text-slate-900">{formatMetric(predictionMutation.data.rf_confidence, 3)}</p>
                 </div>
               </div>
+
+            <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            ANN prediction unavailable - feature dimension mismatch (ANN: 3,256 features, RF: 109 features). ANN retraining required.
+            </p>
 
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                 <p className="text-sm font-semibold text-slate-800">SHAP Feature Importance (top factors)</p>

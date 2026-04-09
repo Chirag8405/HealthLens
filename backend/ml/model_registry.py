@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import Any
 
 import joblib
+from path_utils import models_dir_from
 
 _registry: dict[str, Any] = {}
 
 
 def _models_base_dir() -> Path:
-    return Path(__file__).resolve().parents[2] / "models"
+    return models_dir_from(__file__)
 
 
 def _first_existing_path(candidates: list[Path]) -> Path:

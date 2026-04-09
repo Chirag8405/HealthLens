@@ -33,10 +33,11 @@ from ml.lstm import load_lstm_sepsis_tier_thresholds
 from ml.lstm import train_and_evaluate_lstm
 from ml.model_registry import get_model
 from ml.model_registry import unload_heavy_models
+from path_utils import project_root_from
 
 router = APIRouter()
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = project_root_from(__file__)
 MODELS_DIR = PROJECT_ROOT / "models"
 ANN_RESULTS_PATH = MODELS_DIR / "ann_results.json"
 CNN_RESULTS_PATH = MODELS_DIR / "cnn_results.json"

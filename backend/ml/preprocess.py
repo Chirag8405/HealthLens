@@ -33,6 +33,8 @@ class PreprocessingPipeline:
 
         self.scaler_path = self.processed_dir / "scaler.pkl"
         self.feature_names_path = self.processed_dir / "feature_names.json"
+        self.feature_contract_path = self.processed_dir / "feature_contract.json"
+        self.label_encoders_path = self.processed_dir / "label_encoders.pkl"
         self.artifact_paths = {
             "X_train": self.processed_dir / "X_train.npy",
             "X_test": self.processed_dir / "X_test.npy",
@@ -319,6 +321,22 @@ class PreprocessingPipeline:
 
         self.feature_names_ = X_train.columns.tolist()
         self.processed_dir.mkdir(parents=True, exist_ok=True)
+
+        categorical_cols = [col for col in self.feature_names_ if col not in scaled_numeric_cols]
+        feature_contract = {
+            "feature_names": self.feature_names_,
+            "n_features": len(self.feature_names_),
+            "numerical_cols": scaled_numeric_cols,
+            "categorical_cols": categorical_cols,
+            "scaler_feature_names": scaled_numeric_cols,
+        }
+
+        with self.feature_contract_path.open("w", encoding="utf-8") as fp:
+            json.dump(feature_contract, fp, indent=2)
+        joblib.dump(self.label_encoders, self.label_encoders_path)
+
+        print(f"Feature contract saved: {len(self.feature_names_)} features")
+        print(f"Columns: {self.feature_names_[:10]} ...")
 
         with self.feature_names_path.open("w", encoding="utf-8") as fp:
             json.dump(self.feature_names_, fp, indent=2)

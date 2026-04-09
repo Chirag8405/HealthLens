@@ -12,28 +12,24 @@ from ml.classification import train_and_evaluate_classification
 from ml.clustering import run_clustering
 from ml.data_utils import default_csv_path
 from ml.regression import train_and_evaluate_regression
+from path_utils import project_root_from
 
 router = APIRouter()
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = project_root_from(__file__)
 MODELS_DIR = PROJECT_ROOT / "models"
-LEGACY_MODELS_DIR = PROJECT_ROOT / "backend" / "models"
 
 CLASSIFICATION_RESULTS_PATHS: tuple[Path, ...] = (
     MODELS_DIR / "ml_results.json",
-    LEGACY_MODELS_DIR / "ml_results.json",
 )
 REGRESSION_RESULTS_PATHS: tuple[Path, ...] = (
     MODELS_DIR / "regression_results.json",
-    LEGACY_MODELS_DIR / "regression_results.json",
 )
 CLUSTERING_RESULTS_PATHS: tuple[Path, ...] = (
     MODELS_DIR / "clustering_results.json",
-    LEGACY_MODELS_DIR / "clustering_results.json",
 )
 CLUSTERING_SUMMARY_PATHS: tuple[Path, ...] = (
     MODELS_DIR / "clustering" / "results.json",
-    LEGACY_MODELS_DIR / "clustering" / "results.json",
 )
 
 

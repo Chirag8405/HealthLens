@@ -20,6 +20,7 @@ from ml.lstm import default_lstm_dataset_dirs
 from ml.lstm import train_and_evaluate_lstm
 from ml.preprocess import PreprocessingPipeline
 from ml.regression import train_and_evaluate_regression
+from path_utils import project_root_from
 
 
 @dataclass
@@ -36,6 +37,8 @@ RESULT_CHECKPOINT_FILES: dict[str, str] = {
     "autoencoder": "autoencoder_results.json",
     "lstm": "lstm_results.json",
 }
+
+PROJECT_ROOT = project_root_from(__file__)
 
 
 def _round_float(value: Any, digits: int = 6) -> float | None:
@@ -54,7 +57,7 @@ def _resolve_csv_path(data_dir: Path, csv_path_arg: str | None) -> Path:
     candidate_paths = [
         data_dir / "diabetic_data.csv",
         data_dir / "archive" / "diabetic_data.csv",
-        Path(__file__).resolve().parents[1] / "archive" / "diabetic_data.csv",
+        PROJECT_ROOT / "archive" / "diabetic_data.csv",
         default_csv_path(),
     ]
 
@@ -72,7 +75,7 @@ def _resolve_chest_xray_dir(data_dir: Path, chest_xray_arg: str | None) -> Path:
     candidate_paths = [
         data_dir / "chest_xray",
         data_dir,
-        Path(__file__).resolve().parents[1] / "chest_xray",
+        PROJECT_ROOT / "chest_xray",
     ]
 
     for path in candidate_paths:
@@ -479,7 +482,7 @@ def _load_existing_results_summary(models_dir: Path) -> dict[str, Any] | None:
 
 
 def run_training(args: argparse.Namespace) -> dict[str, Any]:
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = PROJECT_ROOT
     data_dir = Path(args.data_dir).resolve()
     models_dir = Path(args.models_dir).resolve()
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -621,13 +624,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-dir",
         type=str,
-        default="./data",
+        default=str(PROJECT_ROOT / "data"),
         help="Data root directory (expects diabetic_data.csv and dataset subfolders).",
     )
     parser.add_argument(
         "--models-dir",
         type=str,
-        default="./models",
+        default=str(PROJECT_ROOT / "models"),
         help="Directory where model artifacts and summary files are written.",
     )
     parser.add_argument(

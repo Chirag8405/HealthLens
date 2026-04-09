@@ -256,6 +256,9 @@ def train_and_evaluate_classification(
         model = estimator.fit(X_train_scaled, y_train_np)
         model_filename = f"{model.__class__.__name__.lower()}.joblib"
         joblib.dump(model, classification_dir / model_filename)
+        if result_key == "random_forest":
+            # Keep a stable top-level artifact path for API inference loading.
+            joblib.dump(model, models_dir / "rf_model.pkl", compress=3)
 
         metrics, roc_data = _evaluate_model(model, X_test_scaled, y_test_np, legacy_name)
         results_payload[result_key] = metrics

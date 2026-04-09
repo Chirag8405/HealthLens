@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import joblib
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter
@@ -19,12 +20,284 @@ from ml.data_utils import default_csv_path
 from ml.data_utils import impute_missing_values
 from ml.data_utils import map_icd_to_bucket
 from ml.model_registry import get_model
+from path_utils import project_root_from
 
 router = APIRouter()
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = project_root_from(__file__)
 MODELS_DIR = PROJECT_ROOT / "models"
 CLUSTER_META_PATH = MODELS_DIR / "cluster_meta.json"
+RF_MODEL_MISSING_DETAIL = (
+	"RF model not found. "
+	"Run: python backend/scripts/train_rf.py "
+	"to train and save the model first."
+)
+RF_RISK_THRESHOLD = 0.45
+_RF_SCHEMA_LOGGED = False
+
+MEANINGFUL_FEATURES = {
+	"time_in_hospital",
+	"num_lab_procedures",
+	"num_procedures",
+	"num_medications",
+	"number_outpatient",
+	"number_emergency",
+	"number_inpatient",
+	"number_diagnoses",
+	"age",
+	"age_bracket",
+	"gender",
+	"race",
+	"insulin_No",
+	"insulin_Steady",
+	"insulin_Up",
+	"insulin_Down",
+	"change_Ch",
+	"change_No",
+	"diabetesMed_Yes",
+	"diabetesMed_No",
+	"A1Cresult_>8",
+	"A1Cresult_>7",
+	"A1Cresult_Norm",
+	"A1Cresult_None",
+	"max_glu_serum_>300",
+	"max_glu_serum_>200",
+	"max_glu_serum_Norm",
+	"max_glu_serum_None",
+	"admission_type_id_1",
+	"admission_type_id_2",
+	"admission_type_id_3",
+	"admission_type_1",
+	"admission_type_2",
+	"admission_type_3",
+	"discharge_disposition_id_1",
+	"discharge_disposition_id_3",
+	"discharge_disposition_id_6",
+	"discharge_disposition_1",
+	"discharge_disposition_3",
+	"discharge_disposition_6",
+}
+
+
+def _processed_dir_candidates() -> list[Path]:
+	return [
+		PROJECT_ROOT / "backend" / "data" / "processed",
+		PROJECT_ROOT / "data" / "processed",
+	]
+
+
+def _first_existing_file(candidates: list[Path]) -> Path | None:
+	for path in candidates:
+		if path.exists():
+			return path
+	return None
+
+
+@lru_cache(maxsize=1)
+def _resolve_processed_dir() -> Path:
+	for path in _processed_dir_candidates():
+		if path.exists():
+			return path
+	return _processed_dir_candidates()[0]
+
+
+@lru_cache(maxsize=1)
+def _load_feature_contract() -> dict[str, Any]:
+	processed_dir = _resolve_processed_dir()
+	contract_path = processed_dir / "feature_contract.json"
+	if contract_path.exists():
+		with contract_path.open("r", encoding="utf-8") as fp:
+			return json.load(fp)
+
+	# Backward compatibility for older preprocessing artifacts.
+	feature_names_path = processed_dir / "feature_names.json"
+	if feature_names_path.exists():
+		with feature_names_path.open("r", encoding="utf-8") as fp:
+			feature_names = list(json.load(fp))
+		return {
+			"feature_names": feature_names,
+			"n_features": len(feature_names),
+			"numerical_cols": feature_names,
+			"categorical_cols": [],
+			"scaler_feature_names": feature_names,
+		}
+
+	raise FileNotFoundError(
+		f"Feature contract not found in {processed_dir}. Run preprocessing first."
+	)
+
+
+@lru_cache(maxsize=1)
+def _load_label_encoders() -> dict[str, Any]:
+	processed_dir = _resolve_processed_dir()
+	encoders_path = processed_dir / "label_encoders.pkl"
+	if encoders_path.exists():
+		loaded = joblib.load(encoders_path)
+		if isinstance(loaded, dict):
+			return loaded
+	return {}
+
+
+def _age_to_bracket_num(age: int) -> int:
+	brackets = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+	for i, upper in enumerate(brackets):
+		if age < upper:
+			return i
+	return 9
+
+
+@lru_cache(maxsize=1)
+def _load_contract_scaler() -> Any:
+	processed_dir = _resolve_processed_dir()
+	candidates = [
+		MODELS_DIR / "scaler.pkl",
+		processed_dir / "scaler.pkl",
+		MODELS_DIR / "classification" / "scaler.pkl",
+	]
+
+	scaler_path = _first_existing_file(candidates)
+	if scaler_path is None:
+		raise FileNotFoundError(
+			f"No scaler found in expected locations: {candidates}"
+		)
+
+	scaler = joblib.load(scaler_path)
+	print(f"Scaler n_features: {getattr(getattr(scaler, 'mean_', None), 'shape', ('?',))[0]}")
+	print(f"Scaler loaded from: {scaler_path}")
+	return scaler
+
+
+def _set_one_hot_value(df: pd.DataFrame, column: str, active: bool) -> None:
+	if column in df.columns:
+		df.at[0, column] = 1.0 if active else 0.0
+
+
+def build_feature_vector(request_data: dict[str, Any]) -> tuple[np.ndarray, pd.DataFrame]:
+	contract = _load_feature_contract()
+	feature_names = list(contract.get("feature_names", []))
+	if not feature_names:
+		raise ValueError("Feature contract has no feature_names.")
+
+	X = pd.DataFrame(
+		np.zeros((1, len(feature_names)), dtype=np.float64),
+		columns=feature_names,
+	)
+
+	numerical_map = {
+		"time_in_hospital": request_data.get("time_in_hospital", 0),
+		"num_lab_procedures": request_data.get("num_lab_procedures", 0),
+		"num_procedures": request_data.get("num_procedures", 0),
+		"num_medications": request_data.get("num_medications", 0),
+		"number_outpatient": request_data.get("number_outpatient", 0),
+		"number_emergency": request_data.get("number_emergency", 0),
+		"number_inpatient": request_data.get("number_inpatient", 0),
+		"number_diagnoses": request_data.get("number_diagnoses", 0),
+	}
+	for col, val in numerical_map.items():
+		if col in X.columns:
+			X.at[0, col] = float(val)
+
+	age = int(request_data.get("age", 50))
+	if "age" in X.columns:
+		X.at[0, "age"] = float(_age_to_bracket_num(age))
+	if "age_bracket" in X.columns:
+		X.at[0, "age_bracket"] = float(_age_to_bracket_num(age))
+
+	gender = str(request_data.get("gender", "Male"))
+	race = str(request_data.get("race", "Caucasian"))
+	gender_map = {"Male": 0, "Female": 1, "Other": 2}
+	race_map = {
+		"Caucasian": 0,
+		"AfricanAmerican": 1,
+		"Hispanic": 2,
+		"Asian": 3,
+		"Other": 4,
+	}
+
+	encoders = _load_label_encoders()
+	if "gender" in X.columns:
+		if "gender" in encoders:
+			encoder = encoders["gender"]
+			try:
+				X.at[0, "gender"] = float(encoder.transform([gender])[0])
+			except Exception:
+				X.at[0, "gender"] = float(gender_map.get(gender, 0))
+		else:
+			X.at[0, "gender"] = float(gender_map.get(gender, 0))
+
+	if "race" in X.columns:
+		if "race" in encoders:
+			encoder = encoders["race"]
+			try:
+				X.at[0, "race"] = float(encoder.transform([race])[0])
+			except Exception:
+				X.at[0, "race"] = float(race_map.get(race, 0))
+		else:
+			X.at[0, "race"] = float(race_map.get(race, 0))
+
+	insulin = _normalize_text(request_data.get("insulin"), "No")
+	for val in ["No", "Steady", "Up", "Down"]:
+		_set_one_hot_value(X, f"insulin_{val}", insulin == val)
+
+	change = _normalize_text(request_data.get("change"), "No")
+	for val in ["Ch", "No"]:
+		_set_one_hot_value(X, f"change_{val}", change == val)
+
+	diabetes_med = _normalize_text(
+		request_data.get("diabetes_med") or request_data.get("diabetesMed"),
+		"No",
+	)
+	for val in ["Yes", "No"]:
+		_set_one_hot_value(X, f"diabetesMed_{val}", diabetes_med == val)
+
+	a1c = _normalize_text(request_data.get("a1c_result") or request_data.get("A1Cresult"), "None")
+	for val in [">8", ">7", "Norm", "None"]:
+		_set_one_hot_value(X, f"A1Cresult_{val}", a1c == val)
+
+	glu = _normalize_text(request_data.get("max_glu_serum"), "None")
+	for val in [">300", ">200", "Norm", "None"]:
+		_set_one_hot_value(X, f"max_glu_serum_{val}", glu == val)
+
+	adm_type = int(request_data.get("admission_type_id", 1))
+	for i in range(1, 9):
+		_set_one_hot_value(X, f"admission_type_id_{i}", adm_type == i)
+		_set_one_hot_value(X, f"admission_type_{i}", adm_type == i)
+
+	disc = int(request_data.get("discharge_disposition_id", 1))
+	for i in range(1, 30):
+		_set_one_hot_value(X, f"discharge_disposition_id_{i}", disc == i)
+		_set_one_hot_value(X, f"discharge_disposition_{i}", disc == i)
+
+	adm_src = int(request_data.get("admission_source_id", 1))
+	for i in range(1, 26):
+		_set_one_hot_value(X, f"admission_source_id_{i}", adm_src == i)
+		_set_one_hot_value(X, f"admission_source_{i}", adm_src == i)
+
+	scaler = _load_contract_scaler()
+	scaler_feature_names = list(contract.get("scaler_feature_names", []))
+	if hasattr(scaler, "feature_names_in_"):
+		scaler_cols = list(scaler.feature_names_in_)
+		X_for_scaler = X.reindex(columns=scaler_cols, fill_value=0.0)
+	elif hasattr(scaler, "mean_") and scaler.mean_.shape[0] == len(feature_names):
+		X_for_scaler = X
+	elif hasattr(scaler, "mean_") and scaler_feature_names and scaler.mean_.shape[0] == len(scaler_feature_names):
+		X_for_scaler = X.reindex(columns=scaler_feature_names, fill_value=0.0)
+	else:
+		raise ValueError(
+			f"Scaler expects {getattr(getattr(scaler, 'mean_', []), 'shape', ('?',))[0]} features "
+			f"but feature contract has {len(feature_names)}. Retrain preprocessing."
+		)
+
+	X_scaled = scaler.transform(X_for_scaler.values)
+
+	print(f"[predict] Feature vector shape: {X_scaled.shape}")
+	print(f"[predict] Non-zero features: {(X.values != 0).sum()}")
+	print(
+		"[predict] number_inpatient value: "
+		f"{X['number_inpatient'].values[0] if 'number_inpatient' in X.columns else 'NOT FOUND'}"
+	)
+
+	return np.asarray(X_scaled, dtype=np.float64), X
 
 
 class FullPredictionRequest(BaseModel):
@@ -80,11 +353,7 @@ class TabularArtifacts:
 	clustering_feature_names: list[str]
 	pca_2d: Any | None
 	cluster_centers: list[dict[str, Any]]
-	ann_scaler: Any
-	ann_expected_features: int
 	random_forest_model: Any
-	ann_model: Any
-	ann_threshold: float
 	shap_explainer: Any
 
 
@@ -476,7 +745,7 @@ def _top_risk_factors(
 	feature_names: list[str],
 	feature_values: np.ndarray,
 	shap_values: np.ndarray,
-	limit: int = 2,
+	limit: int = 4,
 ) -> list[dict[str, float | str]]:
 	if shap_values.size == 0:
 		return []
@@ -488,6 +757,12 @@ def _top_risk_factors(
 		impact = float(shap_values[idx])
 		value = float(feature_values[idx])
 		rows.append((abs(impact), feature_name, value, impact))
+
+	rows = [
+		row
+		for row in rows
+		if row[1] in MEANINGFUL_FEATURES
+	]
 
 	rows.sort(key=lambda x: x[0], reverse=True)
 
@@ -529,8 +804,30 @@ def _load_shap_explainer() -> Any:
 			"SHAP is required for /predict/full. Install dependency 'shap==0.45.0'."
 		) from exc
 
-	random_forest_model = get_model("rf")
+	try:
+		random_forest_model = get_model("rf")
+	except FileNotFoundError as exc:
+		raise HTTPException(status_code=503, detail=RF_MODEL_MISSING_DETAIL) from exc
 	return shap.TreeExplainer(random_forest_model)
+
+
+def _print_rf_feature_schema_once(rf_model: Any, rf_feature_names: list[str]) -> None:
+	global _RF_SCHEMA_LOGGED
+	if _RF_SCHEMA_LOGGED:
+		return
+
+	print(f"RF n_features_in: {rf_model.n_features_in_}")
+	if hasattr(rf_model, "feature_names_in_"):
+		print("RF feature names:")
+		for i, name in enumerate(rf_model.feature_names_in_):
+			print(f"  {i}: {name}")
+	else:
+		print("RF has no feature_names_in_ - trained on array")
+		print("RF selected feature names (classification selector order):")
+		for i, name in enumerate(rf_feature_names):
+			print(f"  {i}: {name}")
+
+	_RF_SCHEMA_LOGGED = True
 
 
 def _load_tabular_artifacts() -> TabularArtifacts:
@@ -581,16 +878,12 @@ def _load_tabular_artifacts() -> TabularArtifacts:
 		if isinstance(loaded_meta, list):
 			cluster_centers = loaded_meta
 
-	ann_scaler = get_model("ann_scaler")
-	ann_expected_features = int(getattr(ann_scaler, "n_features_in_", len(feature_names)))
-	random_forest_model = get_model("rf")
-	ann_model = get_model("ann")
+	try:
+		random_forest_model = get_model("rf")
+	except FileNotFoundError as exc:
+		raise HTTPException(status_code=503, detail=RF_MODEL_MISSING_DETAIL) from exc
 
-	threshold_payload = get_model("threshold")
-	if isinstance(threshold_payload, dict):
-		ann_threshold = float(threshold_payload.get("best_threshold", 0.4))
-	else:
-		ann_threshold = float(threshold_payload)
+	_print_rf_feature_schema_once(random_forest_model, rf_feature_names)
 
 	return TabularArtifacts(
 		feature_names=feature_names,
@@ -604,11 +897,7 @@ def _load_tabular_artifacts() -> TabularArtifacts:
 		clustering_feature_names=clustering_feature_names,
 		pca_2d=pca_2d,
 		cluster_centers=cluster_centers,
-		ann_scaler=ann_scaler,
-		ann_expected_features=ann_expected_features,
 		random_forest_model=random_forest_model,
-		ann_model=ann_model,
-		ann_threshold=ann_threshold,
 		shap_explainer=_load_shap_explainer(),
 	)
 
@@ -622,7 +911,21 @@ def _predict_full_internal(request: FullPredictionRequest, artifacts: TabularArt
 	if artifacts.classification_selector is not None:
 		rf_input = artifacts.classification_selector.transform(rf_input)
 
-	rf_scaled = artifacts.classification_scaler.transform(rf_input)
+	X_scaled = artifacts.classification_scaler.transform(rf_input)
+
+	rf_model = artifacts.random_forest_model
+	if X_scaled.shape[1] != int(rf_model.n_features_in_):
+		raise HTTPException(
+			status_code=500,
+			detail=(
+				f"Feature mismatch: input has {X_scaled.shape[1]} features "
+				f"but RF expects {rf_model.n_features_in_}. "
+				"Check preprocessing pipeline."
+			),
+		)
+
+	rf_proba = float(rf_model.predict_proba(X_scaled)[0][1])
+	final_risk = rf_proba
 
 	value_by_name = {name: float(raw_vector[idx]) for idx, name in enumerate(artifacts.feature_names)}
 	cluster_vector = np.asarray(
@@ -646,72 +949,72 @@ def _predict_full_internal(request: FullPredictionRequest, artifacts: TabularArt
 	if artifacts.pca_2d is not None:
 		patient_2d = artifacts.pca_2d.transform(pca_input)[0]
 
-	rf_model = artifacts.random_forest_model
-	X_input = rf_scaled
-	rf_raw_proba = rf_model.predict_proba(X_input)
-	rf_probability = float(rf_raw_proba[0, 1])
-
-	risk_score = rf_probability
-
 	# Clinical floor adjustments for known high-risk patterns that are often
 	# under-estimated by population-mean calibrated models.
 	if request.number_inpatient >= 3:
-		risk_score = max(risk_score, 0.55)
+		final_risk = max(final_risk, 0.55)
 	if request.number_inpatient >= 5:
-		risk_score = max(risk_score, 0.70)
+		final_risk = max(final_risk, 0.70)
 	if request.number_emergency >= 2 and request.number_inpatient >= 2:
-		risk_score = max(risk_score, 0.60)
+		final_risk = max(final_risk, 0.60)
 	if request.num_medications >= 20 and request.number_inpatient >= 2:
-		risk_score = max(risk_score, 0.55)
-
-	ann_probability = rf_probability
-	ann_raw_probability = ann_probability
-	if raw_2d.shape[1] == artifacts.ann_expected_features:
-		ann_scaled = artifacts.ann_scaler.transform(raw_2d)
-		ann_pred = artifacts.ann_model.predict(ann_scaled, verbose=0).reshape(-1)
-		ann_raw_probability = float(ann_pred[0])
-		ann_probability = ann_raw_probability
+		final_risk = max(final_risk, 0.55)
+	if (
+		request.number_inpatient >= 3
+		and request.number_emergency >= 2
+		and request.num_medications >= 20
+	):
+		final_risk = max(final_risk, 0.70)
 
 	print("=== PREDICT DEBUG ===")
-	print(f"Input shape: {X_input.shape}")
-	print(f"Feature count expected by RF: {rf_model.n_features_in_}")
-	print(f"Raw RF probability: {rf_raw_proba}")
-	print(f"Raw ANN probability: {ann_raw_probability}")
-	print(f"Final risk score: {risk_score}")
-	print(f"Features used: {X_input[0, :5].tolist()}")
+	print(f"Input shape: {X_scaled.shape}")
+	print(f"RF n_features_in: {rf_model.n_features_in_}")
+	if hasattr(rf_model, "feature_names_in_"):
+		print("RF feature names:")
+		for i, name in enumerate(rf_model.feature_names_in_):
+			print(f"  {i}: {name}")
+	else:
+		print("RF has no feature_names_in_ - trained on array")
+	print(f"Raw RF probability: {rf_proba}")
+	print(f"Final risk score: {final_risk}")
+	print(f"Features used: {X_scaled[0, :5].tolist()}")
 	print("====================")
 
-	raw_shap_values = artifacts.shap_explainer.shap_values(rf_scaled)
+	raw_shap_values = artifacts.shap_explainer.shap_values(X_scaled)
 	row_shap_values = _extract_row_shap_values(raw_shap_values)
 
 	top_factors = _top_risk_factors(
 		artifacts.rf_feature_names,
 		rf_input.reshape(-1),
 		row_shap_values,
-		limit=2,
+		limit=4,
 	)
 
-	level = _risk_level(risk_score, artifacts.ann_threshold)
+	level = _risk_level(final_risk, RF_RISK_THRESHOLD)
 	recommendation = _recommendation_for_level(level)
 
-	response: dict[str, Any] = {
-		"readmission_risk_30day": round(risk_score, 6),
-		"risk_level": level,
-		"top_risk_factors": top_factors,
-		"ann_confidence": round(ann_probability, 6),
-		"rf_confidence": round(rf_probability, 6),
-		"recommendation": recommendation,
-		"patient_cluster": patient_cluster,
-	}
-
+	pca_position: dict[str, float] | None = None
 	if patient_2d is not None:
-		response["pca_position"] = {
+		pca_position = {
 			"x": round(float(patient_2d[0]), 4),
 			"y": round(float(patient_2d[1]), 4),
 		}
 
-	if artifacts.cluster_centers:
-		response["cluster_centers"] = artifacts.cluster_centers
+	response: dict[str, Any] = {
+		"readmission_risk_30day": round(final_risk, 6),
+		"risk_level": level,
+		"rf_confidence": round(rf_proba, 6),
+		"ann_confidence": None,
+		"model_note": (
+			"Prediction uses Random Forest. "
+			"ANN requires retraining on matching features."
+		),
+		"top_risk_factors": top_factors,
+		"recommendation": recommendation,
+		"patient_cluster": patient_cluster,
+		"pca_position": pca_position,
+		"cluster_centers": artifacts.cluster_centers,
+	}
 
 	return response
 
@@ -720,6 +1023,8 @@ def _predict_full_internal(request: FullPredictionRequest, artifacts: TabularArt
 def predict_full(request: FullPredictionRequest) -> dict[str, Any]:
 	try:
 		artifacts = _load_tabular_artifacts()
+	except HTTPException as exc:
+		raise exc
 	except FileNotFoundError as exc:
 		raise HTTPException(status_code=404, detail=str(exc)) from exc
 	except ImportError as exc:
@@ -729,6 +1034,8 @@ def predict_full(request: FullPredictionRequest) -> dict[str, Any]:
 
 	try:
 		return _predict_full_internal(request, artifacts)
+	except HTTPException as exc:
+		raise exc
 	except ValueError as exc:
 		raise HTTPException(status_code=400, detail=str(exc)) from exc
 	except Exception as exc:
