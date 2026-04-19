@@ -927,6 +927,25 @@ def _predict_full_internal(request: FullPredictionRequest, artifacts: TabularArt
 	rf_proba = float(rf_model.predict_proba(X_scaled)[0][1])
 	final_risk = rf_proba
 
+	ann_confidence: float | None = None
+	model_note = "Prediction uses Random Forest as the primary score."
+	try:
+		ann_model = get_model("ann")
+		ann_input_dim = int(getattr(ann_model, "input_shape", (None, X_scaled.shape[1]))[-1])
+		if ann_input_dim == int(X_scaled.shape[1]):
+			ann_pred = ann_model.predict(X_scaled, verbose=0)
+			ann_confidence = float(np.asarray(ann_pred).reshape(-1)[0])
+			model_note = "ANN and Random Forest are both evaluated on the shared feature pipeline."
+		else:
+			model_note = (
+				"ANN prediction unavailable - feature dimension mismatch "
+				f"(ANN: {ann_input_dim:,} features, RF: {X_scaled.shape[1]:,} features)."
+			)
+	except FileNotFoundError:
+		model_note = "ANN artifact not found. Run ANN training to enable ANN confidence."
+	except Exception as exc:
+		model_note = f"ANN inference unavailable: {exc}"
+
 	value_by_name = {name: float(raw_vector[idx]) for idx, name in enumerate(artifacts.feature_names)}
 	cluster_vector = np.asarray(
 		[value_by_name.get(name, 0.0) for name in artifacts.clustering_feature_names],
@@ -976,6 +995,7 @@ def _predict_full_internal(request: FullPredictionRequest, artifacts: TabularArt
 	else:
 		print("RF has no feature_names_in_ - trained on array")
 	print(f"Raw RF probability: {rf_proba}")
+	print(f"ANN probability: {ann_confidence}")
 	print(f"Final risk score: {final_risk}")
 	print(f"Features used: {X_scaled[0, :5].tolist()}")
 	print("====================")
@@ -1004,11 +1024,8 @@ def _predict_full_internal(request: FullPredictionRequest, artifacts: TabularArt
 		"readmission_risk_30day": round(final_risk, 6),
 		"risk_level": level,
 		"rf_confidence": round(rf_proba, 6),
-		"ann_confidence": None,
-		"model_note": (
-			"Prediction uses Random Forest. "
-			"ANN requires retraining on matching features."
-		),
+		"ann_confidence": round(ann_confidence, 6) if ann_confidence is not None else None,
+		"model_note": model_note,
 		"top_risk_factors": top_factors,
 		"recommendation": recommendation,
 		"patient_cluster": patient_cluster,

@@ -32,6 +32,7 @@ type FullPredictionResponse = {
   }>;
   ann_confidence?: number | null;
   rf_confidence?: number;
+  model_note?: string;
   recommendation?: string;
   patient_cluster?: number;
   pca_position?: {
@@ -380,7 +381,7 @@ export default function ResearchDemoPage() {
                 risk_level={predictionMutation.data.risk_level ?? ""}
               />
 
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 sm:grid-cols-3">
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <p className="text-xs uppercase tracking-[0.12em] text-slate-500">Raw probability</p>
                   <p className="text-xl font-bold text-slate-900">{formatMetric(predictionMutation.data.readmission_risk_30day, 3)}</p>
@@ -389,11 +390,17 @@ export default function ResearchDemoPage() {
                   <p className="text-xs uppercase tracking-[0.12em] text-slate-500">RF confidence</p>
                   <p className="text-xl font-bold text-slate-900">{formatMetric(predictionMutation.data.rf_confidence, 3)}</p>
                 </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-xs uppercase tracking-[0.12em] text-slate-500">ANN confidence</p>
+                  <p className="text-xl font-bold text-slate-900">{formatMetric(predictionMutation.data.ann_confidence, 3)}</p>
+                </div>
               </div>
 
-            <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-            ANN prediction unavailable - feature dimension mismatch (ANN: 3,256 features, RF: 109 features). ANN retraining required.
-            </p>
+              {predictionMutation.data.model_note ? (
+                <p className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800">
+                  {predictionMutation.data.model_note}
+                </p>
+              ) : null}
 
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                 <p className="text-sm font-semibold text-slate-800">SHAP Feature Importance (top factors)</p>

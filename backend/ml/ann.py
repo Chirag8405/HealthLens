@@ -21,6 +21,7 @@ import numpy as np
 import seaborn as sns
 import tensorflow as tf
 from tensorflow.keras.regularizers import l2
+from sklearn.feature_selection import VarianceThreshold
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import classification_report
 from sklearn.metrics import confusion_matrix
@@ -50,6 +51,53 @@ def _to_base64_png() -> str:
 def _default_models_dir() -> str:
     project_root = os.path.dirname(BACKEND_ROOT)
     return os.path.join(project_root, "models")
+
+
+def _classification_artifact_paths(models_dir: str) -> tuple[str, str]:
+    classification_dir = os.path.join(models_dir, "classification")
+    selector_path = os.path.join(classification_dir, "variance_selector.pkl")
+    scaler_path = os.path.join(classification_dir, "scaler.pkl")
+    return selector_path, scaler_path
+
+
+def _apply_shared_feature_pipeline(
+    X_train_raw: np.ndarray,
+    X_test_raw: np.ndarray,
+    models_dir: str,
+) -> tuple[np.ndarray, np.ndarray, Any, Any, str, str]:
+    selector_path, classification_scaler_path = _classification_artifact_paths(models_dir)
+
+    if os.path.exists(selector_path) and os.path.exists(classification_scaler_path):
+        selector = joblib.load(selector_path)
+        scaler = joblib.load(classification_scaler_path)
+    else:
+        classification_dir = os.path.dirname(selector_path)
+        os.makedirs(classification_dir, exist_ok=True)
+
+        selector = VarianceThreshold(threshold=0.009)
+        X_train_reduced = selector.fit_transform(X_train_raw)
+        X_test_reduced = selector.transform(X_test_raw)
+
+        scaler = StandardScaler()
+        scaler.fit(X_train_reduced)
+
+        joblib.dump(selector, selector_path)
+        joblib.dump(scaler, classification_scaler_path)
+
+    X_train_reduced = selector.transform(X_train_raw)
+    X_test_reduced = selector.transform(X_test_raw)
+
+    X_train_scaled = scaler.transform(X_train_reduced).astype(np.float32)
+    X_test_scaled = scaler.transform(X_test_reduced).astype(np.float32)
+
+    return (
+        X_train_scaled,
+        X_test_scaled,
+        selector,
+        scaler,
+        selector_path,
+        classification_scaler_path,
+    )
 
 
 def focal_loss(gamma: float = 2.5, alpha: float = 0.75):
@@ -199,7 +247,7 @@ def train_and_evaluate_ann(
         if col in df.columns
     ]
 
-    X = df.drop(columns=drop_cols).astype(np.float32).to_numpy()
+    X = df.drop(columns=drop_cols)
     y = df["readmitted_30"].astype(int).to_numpy()
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -210,15 +258,32 @@ def train_and_evaluate_ann(
         stratify=y,
     )
 
+    X_train_raw = X_train.to_numpy(dtype=np.float64)
+    X_test_raw = X_test.to_numpy(dtype=np.float64)
+
+    (
+        X_train_scaled,
+        X_test_scaled,
+        _selector,
+        classification_scaler,
+        selector_path,
+        classification_scaler_path,
+    ) = _apply_shared_feature_pipeline(
+        X_train_raw=X_train_raw,
+        X_test_raw=X_test_raw,
+        models_dir=models_dir_resolved,
+    )
+
+    print(
+        "ANN using shared classification feature pipeline "
+        f"({X_train_scaled.shape[1]} selected features)."
+    )
+
     sm = SMOTE(random_state=42, sampling_strategy=0.4)
-    X_train_res, y_train_res = sm.fit_resample(X_train, y_train)
+    X_train_res_scaled, y_train_res = sm.fit_resample(X_train_scaled, y_train)
 
-    scaler = StandardScaler()
-    X_train_res_scaled = scaler.fit_transform(X_train_res)
-    X_test_scaled = scaler.transform(X_test)
-
-    scaler_path = os.path.join(models_dir_resolved, "ann_scaler.pkl")
-    joblib.dump(scaler, scaler_path)
+    ann_scaler_path = os.path.join(models_dir_resolved, "ann_scaler.pkl")
+    joblib.dump(classification_scaler, ann_scaler_path)
 
     model = build_ann_model(input_dim=X_train_res_scaled.shape[1])
 
@@ -314,9 +379,12 @@ def train_and_evaluate_ann(
     results: dict[str, Any] = {
         "task": "ann_classification",
         "target": "readmitted_30",
-        "train_shape": [int(X_train.shape[0]), int(X_train.shape[1])],
-        "train_resampled_shape": [int(X_train_res.shape[0]), int(X_train_res.shape[1])],
-        "test_shape": [int(X_test.shape[0]), int(X_test.shape[1])],
+        "raw_train_shape": [int(X_train_raw.shape[0]), int(X_train_raw.shape[1])],
+        "raw_test_shape": [int(X_test_raw.shape[0]), int(X_test_raw.shape[1])],
+        "train_shape": [int(X_train_scaled.shape[0]), int(X_train_scaled.shape[1])],
+        "train_resampled_shape": [int(X_train_res_scaled.shape[0]), int(X_train_res_scaled.shape[1])],
+        "test_shape": [int(X_test_scaled.shape[0]), int(X_test_scaled.shape[1])],
+        "shared_feature_space_with_rf": True,
         "class_weight": None,
         "metrics": metrics,
         "classification_report": report_text,
@@ -325,7 +393,9 @@ def train_and_evaluate_ann(
         "roc_curve_plot": roc_curve_plot,
         "model_path": ann_model_path,
         "best_checkpoint_path": checkpoint_path,
-        "scaler_path": scaler_path,
+        "scaler_path": ann_scaler_path,
+        "classification_selector_path": selector_path,
+        "classification_scaler_path": classification_scaler_path,
         "threshold_path": threshold_path,
     }
 
