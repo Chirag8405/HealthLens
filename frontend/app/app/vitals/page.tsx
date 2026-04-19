@@ -40,26 +40,40 @@ function mapForecastToChart(points: LstmForecastPoint[] | undefined): VitalsPoin
   }));
 }
 
+function normalizeRiskTier(tier: string): "LOW" | "MEDIUM" | "HIGH" {
+  const normalized = tier.trim().toUpperCase();
+  if (normalized === "LOW" || normalized === "MEDIUM" || normalized === "HIGH") {
+    return normalized;
+  }
+  if (normalized.includes("HIGH")) {
+    return "HIGH";
+  }
+  if (normalized.includes("MEDIUM")) {
+    return "MEDIUM";
+  }
+  return "LOW";
+}
+
 function riskBannerClasses(tier: string): string {
-  const normalized = tier.toLowerCase();
-  if (normalized.includes("high")) {
+  const normalized = normalizeRiskTier(tier);
+  if (normalized === "HIGH") {
     return "border-red-300 bg-red-50 text-red-900";
   }
-  if (normalized.includes("elevated") || normalized.includes("moderate") || normalized.includes("medium")) {
+  if (normalized === "MEDIUM") {
     return "border-amber-300 bg-amber-50 text-amber-900";
   }
   return "border-emerald-300 bg-emerald-50 text-emerald-900";
 }
 
 function riskBannerText(tier: string): string {
-  const normalized = tier.toLowerCase();
-  if (normalized.includes("high")) {
-    return "High Sepsis Risk - Immediate clinical review advised";
+  const normalized = normalizeRiskTier(tier);
+  if (normalized === "HIGH") {
+    return "HIGH Sepsis Risk - Immediate clinical review advised";
   }
-  if (normalized.includes("elevated") || normalized.includes("moderate") || normalized.includes("medium")) {
-    return "Moderate Sepsis Risk - Monitor closely";
+  if (normalized === "MEDIUM") {
+    return "MEDIUM Sepsis Risk - Monitor closely";
   }
-  return "Low Sepsis Risk";
+  return "LOW Sepsis Risk - Continue monitoring";
 }
 
 export default function ClinicalVitalsPage() {

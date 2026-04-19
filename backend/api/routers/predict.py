@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from ml.model_registry import get_model
 from path_utils import project_root_from
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = project_root_from(__file__)
 MODELS_DIR = PROJECT_ROOT / "models"
@@ -162,8 +164,11 @@ def _load_contract_scaler() -> Any:
 		)
 
 	scaler = joblib.load(scaler_path)
-	print(f"Scaler n_features: {getattr(getattr(scaler, 'mean_', None), 'shape', ('?',))[0]}")
-	print(f"Scaler loaded from: {scaler_path}")
+	logger.debug(
+		"Scaler n_features: %s",
+		getattr(getattr(scaler, "mean_", None), "shape", ("?",))[0],
+	)
+	logger.debug("Scaler loaded from: %s", scaler_path)
 	return scaler
 
 
@@ -290,11 +295,11 @@ def build_feature_vector(request_data: dict[str, Any]) -> tuple[np.ndarray, pd.D
 
 	X_scaled = scaler.transform(X_for_scaler.values)
 
-	print(f"[predict] Feature vector shape: {X_scaled.shape}")
-	print(f"[predict] Non-zero features: {(X.values != 0).sum()}")
-	print(
-		"[predict] number_inpatient value: "
-		f"{X['number_inpatient'].values[0] if 'number_inpatient' in X.columns else 'NOT FOUND'}"
+	logger.debug("[predict] Feature vector shape: %s", X_scaled.shape)
+	logger.debug("[predict] Non-zero features: %s", (X.values != 0).sum())
+	logger.debug(
+		"[predict] number_inpatient value: %s",
+		X["number_inpatient"].values[0] if "number_inpatient" in X.columns else "NOT FOUND",
 	)
 
 	return np.asarray(X_scaled, dtype=np.float64), X
@@ -327,17 +332,6 @@ class FullPredictionRequest(BaseModel):
 	change: str | None = None
 	diabetes_med: str | None = None
 	diabetesMed: str | None = None
-
-
-class RiskPredictionRequest(BaseModel):
-	age: int = Field(default=58, ge=0, le=120)
-	hr: float = Field(default=92.0, ge=0)
-	o2sat: float = Field(default=94.0, ge=0)
-	temp: float = Field(default=37.8, ge=0)
-	sbp: float = Field(default=108.0, ge=0)
-	map: float = Field(default=74.0, ge=0)
-	wbc: float = Field(default=12.0, ge=0)
-	lactate: float = Field(default=2.1, ge=0)
 
 
 @dataclass
@@ -816,16 +810,16 @@ def _print_rf_feature_schema_once(rf_model: Any, rf_feature_names: list[str]) ->
 	if _RF_SCHEMA_LOGGED:
 		return
 
-	print(f"RF n_features_in: {rf_model.n_features_in_}")
+	logger.debug("RF n_features_in: %s", rf_model.n_features_in_)
 	if hasattr(rf_model, "feature_names_in_"):
-		print("RF feature names:")
+		logger.debug("RF feature names:")
 		for i, name in enumerate(rf_model.feature_names_in_):
-			print(f"  {i}: {name}")
+			logger.debug("  %s: %s", i, name)
 	else:
-		print("RF has no feature_names_in_ - trained on array")
-		print("RF selected feature names (classification selector order):")
+		logger.debug("RF has no feature_names_in_ - trained on array")
+		logger.debug("RF selected feature names (classification selector order):")
 		for i, name in enumerate(rf_feature_names):
-			print(f"  {i}: {name}")
+			logger.debug("  %s: %s", i, name)
 
 	_RF_SCHEMA_LOGGED = True
 
@@ -985,20 +979,20 @@ def _predict_full_internal(request: FullPredictionRequest, artifacts: TabularArt
 	):
 		final_risk = max(final_risk, 0.70)
 
-	print("=== PREDICT DEBUG ===")
-	print(f"Input shape: {X_scaled.shape}")
-	print(f"RF n_features_in: {rf_model.n_features_in_}")
+	logger.debug("=== PREDICT DEBUG ===")
+	logger.debug("Input shape: %s", X_scaled.shape)
+	logger.debug("RF n_features_in: %s", rf_model.n_features_in_)
 	if hasattr(rf_model, "feature_names_in_"):
-		print("RF feature names:")
+		logger.debug("RF feature names:")
 		for i, name in enumerate(rf_model.feature_names_in_):
-			print(f"  {i}: {name}")
+			logger.debug("  %s: %s", i, name)
 	else:
-		print("RF has no feature_names_in_ - trained on array")
-	print(f"Raw RF probability: {rf_proba}")
-	print(f"ANN probability: {ann_confidence}")
-	print(f"Final risk score: {final_risk}")
-	print(f"Features used: {X_scaled[0, :5].tolist()}")
-	print("====================")
+		logger.debug("RF has no feature_names_in_ - trained on array")
+	logger.debug("Raw RF probability: %s", rf_proba)
+	logger.debug("ANN probability: %s", ann_confidence)
+	logger.debug("Final risk score: %s", final_risk)
+	logger.debug("Features used: %s", X_scaled[0, :5].tolist())
+	logger.debug("====================")
 
 	raw_shap_values = artifacts.shap_explainer.shap_values(X_scaled)
 	row_shap_values = _extract_row_shap_values(raw_shap_values)
@@ -1057,42 +1051,3 @@ def predict_full(request: FullPredictionRequest) -> dict[str, Any]:
 		raise HTTPException(status_code=400, detail=str(exc)) from exc
 	except Exception as exc:
 		raise HTTPException(status_code=500, detail=f"/predict/full inference failed: {exc}") from exc
-
-
-@router.post("/risk")
-def predict_risk(request: RiskPredictionRequest) -> dict[str, Any]:
-	# Backward-compatible lightweight risk estimator for existing frontend callers.
-	score = 0.0
-	score += max(request.hr - 85.0, 0.0) / 80.0 * 0.20
-	score += max(94.0 - request.o2sat, 0.0) / 12.0 * 0.20
-	score += max(request.temp - 37.2, 0.0) / 3.0 * 0.10
-	score += max(36.0 - request.temp, 0.0) / 3.0 * 0.10
-	score += max(100.0 - request.sbp, 0.0) / 60.0 * 0.15
-	score += max(70.0 - request.map, 0.0) / 40.0 * 0.15
-	score += max(request.wbc - 11.0, 0.0) / 20.0 * 0.05
-	score += max(request.lactate - 2.0, 0.0) / 6.0 * 0.05
-
-	score = float(max(0.0, min(1.0, score)))
-
-	if score >= 0.65:
-		tier = "HIGH"
-		note = "priority review"
-		band = "prob >= 0.65"
-	elif score >= 0.35:
-		tier = "ELEVATED"
-		note = "increased monitoring"
-		band = "0.35 <= prob < 0.65"
-	else:
-		tier = "ROUTINE"
-		note = "monitor normally"
-		band = "prob < 0.35"
-
-	return {
-		"risk_score": round(score, 6),
-		"risk_tier": tier,
-		"risk_note": note,
-		"sepsis_risk_score": round(score, 6),
-		"sepsis_risk_tier": tier,
-		"sepsis_risk_note": note,
-		"sepsis_risk_band": band,
-	}

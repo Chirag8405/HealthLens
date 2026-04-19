@@ -28,6 +28,15 @@ function titleCase(input: string): string {
     .join(" ");
 }
 
+function MissingDataCard({ title }: { title: string }) {
+  return (
+    <div className="rounded-2xl border border-slate-300 bg-slate-100 p-4 text-sm text-slate-700">
+      <p className="font-semibold text-slate-800">{title}</p>
+      <p className="mt-1">Run training to generate results</p>
+    </div>
+  );
+}
+
 export default function ResearchEdaPage() {
   const plotsQuery = useQuery({
     queryKey: ["research-eda-plots"],
@@ -63,6 +72,7 @@ export default function ResearchEdaPage() {
 
   const isLoading = plotsQuery.isLoading || summaryQuery.isLoading;
   const error = plotsQuery.error ?? summaryQuery.error;
+  const summary = summaryQuery.data?.summary;
 
   return (
     <section className="space-y-7">
@@ -70,52 +80,70 @@ export default function ResearchEdaPage() {
         <h2 className="text-3xl font-bold text-blue-950">Dataset Overview - Diabetes 130-US Hospitals</h2>
       </header>
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard label="Total Patients" value="101,766" unit="records" accent="blue" />
-        <MetricCard label="Features" value="50" unit="columns" accent="teal" />
-        <MetricCard label="Readmission Rate" value="13" unit="%" accent="amber" />
-        <MetricCard label="Missing Values Handled" value="Yes" accent="rose" />
-      </div>
+      {summary ? (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <MetricCard label="Rows" value={summary.rows.toLocaleString()} unit="records" accent="blue" />
+          <MetricCard label="Columns" value={summary.columns.toLocaleString()} unit="features" accent="teal" />
+          <MetricCard
+            label="Missing Values"
+            value={summary.missing_values_total.toLocaleString()}
+            unit="entries"
+            accent="amber"
+          />
+          <MetricCard
+            label="Readmitted <30"
+            value={String(summary.readmitted_30_distribution?.["<30"] ?? "--")}
+            unit="cases"
+            accent="rose"
+          />
+        </div>
+      ) : !isLoading && !error ? (
+        <MissingDataCard title="EDA summary unavailable" />
+      ) : null}
 
       {isLoading ? <LoadingSpinner label="Loading EDA artifacts" /> : null}
       {error ? <ErrorBanner message={error instanceof Error ? error.message : "Failed to load EDA data."} /> : null}
 
       {!isLoading && !error ? (
-        <section className="grid gap-4 lg:grid-cols-2">
-          {orderedPlots.map(([key, image], idx) => (
-            <PlotCard
-              key={key}
-              title={titleCase(key)}
-              description={plotDescriptions[key] ?? "Exploratory analysis figure from the data pipeline."}
-              image_b64={image}
-              downloadable
-              downloadName={`eda-${idx + 1}-${key}.png`}
-            />
-          ))}
-        </section>
+        orderedPlots.length ? (
+          <section className="grid gap-4 lg:grid-cols-2">
+            {orderedPlots.map(([key, image], idx) => (
+              <PlotCard
+                key={key}
+                title={titleCase(key)}
+                description={plotDescriptions[key] ?? "Exploratory analysis figure from the data pipeline."}
+                image_b64={image}
+                downloadable
+                downloadName={`eda-${idx + 1}-${key}.png`}
+              />
+            ))}
+          </section>
+        ) : (
+          <MissingDataCard title="EDA plots unavailable" />
+        )
       ) : null}
 
-      {summaryQuery.data?.summary ? (
+      {summary ? (
         <section className="space-y-4 rounded-2xl border border-blue-200 bg-white p-6 shadow-sm">
           <h3 className="text-lg font-semibold text-blue-950">Summary Statistics</h3>
 
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <div className="rounded-lg border border-slate-200 p-3">
               <p className="text-xs uppercase tracking-[0.12em] text-slate-500">Rows</p>
-              <p className="text-2xl font-bold text-slate-900">{summaryQuery.data.summary.rows.toLocaleString()}</p>
+              <p className="text-2xl font-bold text-slate-900">{summary.rows.toLocaleString()}</p>
             </div>
             <div className="rounded-lg border border-slate-200 p-3">
               <p className="text-xs uppercase tracking-[0.12em] text-slate-500">Columns</p>
-              <p className="text-2xl font-bold text-slate-900">{summaryQuery.data.summary.columns.toLocaleString()}</p>
+              <p className="text-2xl font-bold text-slate-900">{summary.columns.toLocaleString()}</p>
             </div>
             <div className="rounded-lg border border-slate-200 p-3">
               <p className="text-xs uppercase tracking-[0.12em] text-slate-500">Missing Values</p>
-              <p className="text-2xl font-bold text-slate-900">{summaryQuery.data.summary.missing_values_total.toLocaleString()}</p>
+              <p className="text-2xl font-bold text-slate-900">{summary.missing_values_total.toLocaleString()}</p>
             </div>
             <div className="rounded-lg border border-slate-200 p-3">
               <p className="text-xs uppercase tracking-[0.12em] text-slate-500">Readmitted &lt;30</p>
               <p className="text-sm font-semibold text-slate-900">
-                {Object.entries(summaryQuery.data.summary.readmitted_30_distribution)
+                {Object.entries(summary.readmitted_30_distribution)
                   .map(([key, value]) => `${key}: ${value}`)
                   .join(" | ")}
               </p>
@@ -147,6 +175,8 @@ export default function ResearchEdaPage() {
             </table>
           </div>
         </section>
+      ) : !isLoading && !error ? (
+        <MissingDataCard title="Summary statistics unavailable" />
       ) : null}
     </section>
   );

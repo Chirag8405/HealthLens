@@ -77,7 +77,7 @@ SEPSIS_EPOCHS = 80
 BATCH_SIZE = 64
 MAX_PATIENTS_DEFAULT = 1200
 SEPSIS_TIER_THRESHOLDS = {
-    "ELEVATED": 0.15,
+    "MEDIUM": 0.15,
     "HIGH": 0.35,
 }
 SEPSIS_TIER_NOTE = "Empirical thresholds. HIGH tier shows 8.9x lift over base rate."
@@ -87,13 +87,13 @@ SEPSIS_RISK_NOTE = (
     "before operational use."
 )
 SEPSIS_TIER_ACTION_NOTES = {
-    "ROUTINE": "monitor normally",
-    "ELEVATED": "increased monitoring",
+    "LOW": "monitor normally",
+    "MEDIUM": "increased monitoring",
     "HIGH": "priority review",
 }
 SEPSIS_TIER_BANDS = {
-    "ROUTINE": "prob < 0.15",
-    "ELEVATED": "prob 0.15-0.35",
+    "LOW": "prob < 0.15",
+    "MEDIUM": "prob 0.15-0.35",
     "HIGH": "prob >= 0.35",
 }
 
@@ -237,7 +237,7 @@ def save_lstm_sepsis_tier_thresholds(
 
     payload = {
         "thresholds": {
-            "ELEVATED": float(resolved["ELEVATED"]),
+            "MEDIUM": float(resolved.get("MEDIUM", 0.15)),
             "HIGH": float(resolved["HIGH"]),
         },
         "note": SEPSIS_TIER_NOTE,
@@ -261,17 +261,10 @@ def load_lstm_sepsis_tier_thresholds(models_dir: str | Path | None = None) -> di
         with path.open("r", encoding="utf-8") as fp:
             payload = json.load(fp)
         raw = payload.get("thresholds", {})
-        elevated_threshold = float(
-            raw.get("ELEVATED", raw.get("MODERATE", SEPSIS_TIER_THRESHOLDS["ELEVATED"]))
-        )
-        high_threshold = float(
-            raw.get(
-                "CRITICAL",
-                raw.get("HIGH", SEPSIS_TIER_THRESHOLDS["HIGH"]),
-            )
-        )
+        medium_threshold = float(raw.get("MEDIUM", SEPSIS_TIER_THRESHOLDS["MEDIUM"]))
+        high_threshold = float(raw.get("HIGH", SEPSIS_TIER_THRESHOLDS["HIGH"]))
         return {
-            "ELEVATED": elevated_threshold,
+            "MEDIUM": medium_threshold,
             "HIGH": high_threshold,
         }
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -282,8 +275,8 @@ def load_lstm_sepsis_tier_thresholds(models_dir: str | Path | None = None) -> di
 def assign_risk_tiers(proba: np.ndarray) -> np.ndarray:
     values = np.asarray(proba, dtype=np.float32).reshape(-1)
 
-    tiers = np.full(len(values), "ROUTINE", dtype=object)
-    tiers[values >= float(SEPSIS_TIER_THRESHOLDS["ELEVATED"])] = "ELEVATED"
+    tiers = np.full(len(values), "LOW", dtype=object)
+    tiers[values >= float(SEPSIS_TIER_THRESHOLDS["MEDIUM"])] = "MEDIUM"
     tiers[values >= float(SEPSIS_TIER_THRESHOLDS["HIGH"])] = "HIGH"
     return tiers
 
@@ -322,7 +315,7 @@ def _build_task_b_risk_results(
     base_rate = float(y_true_arr.mean()) if len(y_true_arr) > 0 else 0.0
 
     tier_stats: dict[str, dict[str, float | int | None]] = {}
-    for tier in ["ROUTINE", "ELEVATED", "HIGH"]:
+    for tier in ["LOW", "MEDIUM", "HIGH"]:
         mask = sepsis_tiers == tier
         count = int(mask.sum())
         pos_in_tier = int(y_true_arr[mask].sum()) if count > 0 else 0

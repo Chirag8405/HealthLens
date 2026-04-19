@@ -93,40 +93,46 @@ const formatValue = (feature: string, value: number) => {
   return formatted;
 };
 
-function resolveRiskBand(score: number, level: string): "low" | "moderate" | "high" {
+function normalizeRiskTier(score: number, level: string): "LOW" | "MEDIUM" | "HIGH" {
+  const normalized = level.trim().toUpperCase();
+  if (normalized === "LOW" || normalized === "MEDIUM" || normalized === "HIGH") {
+    return normalized;
+  }
+  if (normalized.includes("HIGH")) {
+    return "HIGH";
+  }
+  if (normalized.includes("MEDIUM")) {
+    return "MEDIUM";
+  }
+  if (normalized.includes("LOW")) {
+    return "LOW";
+  }
+
   if (Number.isFinite(score)) {
     if (score > 0.6) {
-      return "high";
+      return "HIGH";
     }
     if (score >= 0.3) {
-      return "moderate";
+      return "MEDIUM";
     }
-    return "low";
   }
 
-  const normalized = level.trim().toLowerCase();
-  if (normalized.includes("high")) {
-    return "high";
-  }
-  if (normalized.includes("moderate") || normalized.includes("elevated") || normalized.includes("medium")) {
-    return "moderate";
-  }
-  return "low";
+  return "LOW";
 }
 
-const BANNER_STYLES: Record<"low" | "moderate" | "high", BannerVariant> = {
-  low: {
-    title: "Low Risk",
+const BANNER_STYLES: Record<"LOW" | "MEDIUM" | "HIGH", BannerVariant> = {
+  LOW: {
+    title: "LOW Risk",
     guidance: "Routine follow-up recommended",
     classes: "border-emerald-300 bg-emerald-50 text-emerald-900",
   },
-  moderate: {
-    title: "Moderate Risk",
+  MEDIUM: {
+    title: "MEDIUM Risk",
     guidance: "Schedule follow-up within 2 weeks",
     classes: "border-amber-300 bg-amber-50 text-amber-900",
   },
-  high: {
-    title: "High Risk",
+  HIGH: {
+    title: "HIGH Risk",
     guidance: "Schedule follow-up within 72 hours",
     classes: "border-red-300 bg-red-50 text-red-900",
   },
@@ -137,8 +143,8 @@ export default function RiskBanner({
   risk_level,
   top_risk_factors = [],
 }: RiskBannerProps) {
-  const band = resolveRiskBand(risk_score, risk_level);
-  const style = BANNER_STYLES[band];
+  const tier = normalizeRiskTier(risk_score, risk_level);
+  const style = BANNER_STYLES[tier];
 
   return (
     <div className={`rounded-2xl border p-5 ${style.classes}`}>

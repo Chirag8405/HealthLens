@@ -7,7 +7,14 @@ import { PolarAngleAxis, RadialBar, RadialBarChart, ResponsiveContainer } from "
 import ErrorBanner from "@/components/ErrorBanner";
 import LoadingSpinner from "@/components/LoadingSpinner";
 import { postJSON, uploadFile } from "@/lib/api";
-import type { CnnPredictResponse, RiskPredictionResponse } from "@/lib/types";
+import type { CnnPredictResponse } from "@/lib/types";
+
+type FullPredictionResponse = {
+  readmission_risk_30day?: number;
+  risk_level?: string;
+  recommendation?: string;
+  [key: string]: unknown;
+};
 
 type RiskFormState = {
   age: number;
@@ -49,15 +56,8 @@ export default function PredictPage() {
 
   const riskMutation = useMutation({
     mutationFn: (payload: RiskFormState) =>
-      postJSON<RiskPredictionResponse, Record<string, unknown>>("/predict/risk", {
+      postJSON<FullPredictionResponse, Record<string, unknown>>("/predict/full", {
         age: payload.age,
-        hr: payload.heartRate,
-        o2sat: payload.o2Sat,
-        temp: payload.temperature,
-        sbp: payload.systolicBp,
-        map: payload.map,
-        wbc: payload.wbc,
-        lactate: payload.lactate,
       }),
   });
 
@@ -67,17 +67,15 @@ export default function PredictPage() {
 
   const derivedRisk = useMemo(() => {
     const payload = riskMutation.data;
-    const score = asNumber(payload?.sepsis_risk_score) ?? asNumber(payload?.risk_score);
-    const tier = asString(payload?.sepsis_risk_tier) ?? asString(payload?.risk_tier);
-    const note = asString(payload?.sepsis_risk_note) ?? asString(payload?.risk_note);
-    const band = asString(payload?.sepsis_risk_band);
+    const score = asNumber(payload?.readmission_risk_30day);
+    const tier = asString(payload?.risk_level);
+    const note = asString(payload?.recommendation);
 
     return {
       score,
       scorePct: score !== undefined ? clamp(score * 100, 0, 100) : undefined,
       tier,
       note,
-      band,
     };
   }, [riskMutation.data]);
 
@@ -109,7 +107,7 @@ export default function PredictPage() {
       <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
         <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <h3 className="text-lg font-semibold text-slate-900">Risk Scoring Form</h3>
-          <p className="mt-1 text-sm text-slate-500">POST request target: /predict/risk</p>
+          <p className="mt-1 text-sm text-slate-500">POST request target: /predict/full</p>
 
           <form onSubmit={onRiskSubmit} className="mt-4 space-y-4">
             <div className="grid gap-3 sm:grid-cols-2">
@@ -206,7 +204,7 @@ export default function PredictPage() {
             </button>
           </form>
 
-          {riskMutation.isPending ? <LoadingSpinner className="mt-3" label="Calling /predict/risk" /> : null}
+          {riskMutation.isPending ? <LoadingSpinner className="mt-3" label="Calling /predict/full" /> : null}
           {riskMutation.error ? (
             <div className="mt-3">
               <ErrorBanner
@@ -241,7 +239,6 @@ export default function PredictPage() {
               {derivedRisk.scorePct !== undefined ? `${derivedRisk.scorePct.toFixed(1)}%` : "--"}
             </p>
             <p className="text-sm text-slate-600">Tier: {derivedRisk.tier ?? "--"}</p>
-            {derivedRisk.band ? <p className="text-sm text-slate-500">Band: {derivedRisk.band}</p> : null}
             {derivedRisk.note ? <p className="text-sm text-slate-500">Note: {derivedRisk.note}</p> : null}
           </div>
         </article>

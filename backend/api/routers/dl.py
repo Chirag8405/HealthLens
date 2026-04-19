@@ -120,9 +120,9 @@ def _compute_trend(values: list[float]) -> str:
 
 def _risk_label(risk_tier: str) -> str:
     labels = {
-        "LOW": "Low Sepsis Risk - Continue monitoring",
-        "MEDIUM": "Moderate Sepsis Risk - Monitor closely",
-        "HIGH": "High Sepsis Risk - Immediate clinical review advised",
+        "LOW": "LOW Sepsis Risk - Continue monitoring",
+        "MEDIUM": "MEDIUM Sepsis Risk - Monitor closely",
+        "HIGH": "HIGH Sepsis Risk - Immediate clinical review advised",
     }
     return labels.get(risk_tier.upper(), "Risk assessment unavailable")
 
@@ -249,7 +249,7 @@ def get_lstm_results(
         if isinstance(task_b_cached, dict):
             tier_keys = set(task_b_cached.get("risk_tiers", {}).keys())
 
-        if tier_keys == {"ROUTINE", "ELEVATED", "HIGH"}:
+        if tier_keys == {"LOW", "MEDIUM", "HIGH"}:
             return cached
 
         inferred_max_patients = cached.get("data", {}).get("patients_used", max_patients)
@@ -346,12 +346,12 @@ async def predict_lstm(file: UploadFile = File(...)) -> dict[str, Any]:
         risk_score = float(window_scores.max()) if window_scores.size > 0 else 0.0
 
         tier_thresholds = load_lstm_sepsis_tier_thresholds(MODELS_DIR)
-        elevated_threshold = float(tier_thresholds.get("ELEVATED", 0.15))
+        medium_threshold = float(tier_thresholds.get("MEDIUM", 0.15))
         high_threshold = float(tier_thresholds.get("HIGH", 0.35))
 
         if risk_score >= high_threshold:
             risk_tier = "HIGH"
-        elif risk_score >= elevated_threshold:
+        elif risk_score >= medium_threshold:
             risk_tier = "MEDIUM"
         else:
             risk_tier = "LOW"

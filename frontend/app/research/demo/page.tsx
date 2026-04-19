@@ -30,7 +30,6 @@ type FullPredictionResponse = {
     value: number;
     impact: number;
   }>;
-  ann_confidence?: number | null;
   rf_confidence?: number;
   model_note?: string;
   recommendation?: string;
@@ -381,7 +380,7 @@ export default function ResearchDemoPage() {
                 risk_level={predictionMutation.data.risk_level ?? ""}
               />
 
-              <div className="grid gap-3 sm:grid-cols-3">
+              <div className="grid gap-3 sm:grid-cols-2">
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <p className="text-xs uppercase tracking-[0.12em] text-slate-500">Raw probability</p>
                   <p className="text-xl font-bold text-slate-900">{formatMetric(predictionMutation.data.readmission_risk_30day, 3)}</p>
@@ -389,10 +388,6 @@ export default function ResearchDemoPage() {
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <p className="text-xs uppercase tracking-[0.12em] text-slate-500">RF confidence</p>
                   <p className="text-xl font-bold text-slate-900">{formatMetric(predictionMutation.data.rf_confidence, 3)}</p>
-                </div>
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-xs uppercase tracking-[0.12em] text-slate-500">ANN confidence</p>
-                  <p className="text-xl font-bold text-slate-900">{formatMetric(predictionMutation.data.ann_confidence, 3)}</p>
                 </div>
               </div>
 

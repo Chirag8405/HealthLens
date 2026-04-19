@@ -1,6 +1,5 @@
 "use client";
 
-import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import ErrorBanner from "@/components/ErrorBanner";
@@ -15,6 +14,15 @@ function formatMetric(value: number | null | undefined, digits = 3): string {
     return "--";
   }
   return value.toFixed(digits);
+}
+
+function MissingDataCard({ title }: { title: string }) {
+  return (
+    <div className="rounded-2xl border border-slate-300 bg-slate-100 p-4 text-sm text-slate-700">
+      <p className="font-semibold text-slate-800">{title}</p>
+      <p className="mt-1">Run training to generate results</p>
+    </div>
+  );
 }
 
 export default function ResearchDlPage() {
@@ -40,11 +48,6 @@ export default function ResearchDlPage() {
 
   const isLoading = annQuery.isLoading || cnnQuery.isLoading || autoQuery.isLoading || lstmQuery.isLoading;
   const error = annQuery.error ?? cnnQuery.error ?? autoQuery.error ?? lstmQuery.error;
-
-  const cnnGradcamSamples = useMemo(() => {
-    const image = cnnQuery.data?.gradcam_plot;
-    return image ? [image, image, image, image] : [];
-  }, [cnnQuery.data?.gradcam_plot]);
 
   return (
     <section className="space-y-7">
@@ -96,15 +99,21 @@ Input(N) -&gt; Dense(128) -&gt; BN -&gt; Dropout(0.4)
             <p className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
               Class imbalance handling includes resampling and focal-style optimization to improve minority recall.
             </p>
+
+            <p className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              Note: ANN model (3,256 features) was trained on a different feature representation than the Random Forest
+              (109 features). ANN is displayed for evaluation purposes only. Live predictions use Random Forest
+              exclusively. ANN retraining on the standardised feature set is planned as a next step.
+            </p>
           </section>
 
           <section className="space-y-4 rounded-2xl border border-blue-200 bg-white p-6 shadow-sm">
             <h3 className="text-xl font-semibold text-blue-950">CNN</h3>
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-              <MetricCard label="Accuracy" value={formatMetric(cnnQuery.data?.metrics?.accuracy ?? 0.885)} unit="" accent="blue" />
-              <MetricCard label="F1" value={formatMetric(cnnQuery.data?.metrics?.f1 ?? 0.913)} accent="teal" />
-              <MetricCard label="AUC" value={formatMetric(cnnQuery.data?.metrics?.auc ?? 0.961)} accent="amber" />
-              <MetricCard label="Recall" value={formatMetric(cnnQuery.data?.metrics?.recall ?? 0.974)} accent="rose" />
+              <MetricCard label="Accuracy" value={formatMetric(cnnQuery.data?.metrics?.accuracy)} unit="" accent="blue" />
+              <MetricCard label="F1" value={formatMetric(cnnQuery.data?.metrics?.f1)} accent="teal" />
+              <MetricCard label="AUC" value={formatMetric(cnnQuery.data?.metrics?.auc)} accent="amber" />
+              <MetricCard label="Recall" value={formatMetric(cnnQuery.data?.metrics?.recall)} accent="rose" />
             </div>
 
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
@@ -132,18 +141,17 @@ Input(N) -&gt; Dense(128) -&gt; BN -&gt; Dropout(0.4)
               />
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              {cnnGradcamSamples.map((image, idx) => (
-                <PlotCard
-                  key={`gradcam-${idx}`}
-                  title={`Grad-CAM Example ${idx + 1}`}
-                  description="Attention visualization on representative chest X-ray sample."
-                  image_b64={image}
-                  downloadable
-                  downloadName={`gradcam-example-${idx + 1}.png`}
-                />
-              ))}
-            </div>
+            {cnnQuery.data?.gradcam_plot ? (
+              <PlotCard
+                title="Grad-CAM"
+                description="Attention visualization from /dl/cnn/results."
+                image_b64={cnnQuery.data.gradcam_plot}
+                downloadable
+                downloadName="cnn-gradcam.png"
+              />
+            ) : (
+              <MissingDataCard title="Grad-CAM artifact unavailable" />
+            )}
 
             <p className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
               Two-phase training strategy improves domain transfer while preserving pretrained feature priors.
@@ -215,6 +223,10 @@ Input(N) -&gt; Dense(128) -&gt; BN -&gt; Dropout(0.4)
                 downloadName="lstm-sepsis-roc.png"
               />
             </div>
+
+            {!lstmQuery.data?.task_a_vitals?.actual_vs_predicted_hr_plot && !lstmQuery.data?.task_b_sepsis?.roc_curve_plot ? (
+              <MissingDataCard title="LSTM visualization artifacts unavailable" />
+            ) : null}
           </section>
         </>
       ) : null}
