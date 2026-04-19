@@ -6,7 +6,8 @@ import tensorflow as tf
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import dl, eda, health, ml, predict
+from api.db import dispose_engine
+from api.routers import dl, eda, health, ml, predict, predictions
 
 gpus = tf.config.experimental.list_physical_devices("GPU")
 if gpus:
@@ -41,8 +42,14 @@ async def startup() -> None:
     print("HealthLens API started. Models load on first request.")
 
 
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    await dispose_engine()
+
+
 app.include_router(health.router, tags=["Health"])
 app.include_router(eda.router, tags=["EDA"])
 app.include_router(ml.router, prefix="/ml", tags=["ML"])
 app.include_router(dl.router, prefix="/dl", tags=["DL"])
 app.include_router(predict.router, prefix="/predict", tags=["Predict"])
+app.include_router(predictions.router, tags=["Predictions"])

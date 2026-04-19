@@ -86,6 +86,12 @@ Run backend API:
 uvicorn api.main:app --reload --port 8000
 ```
 
+Run database migrations (from `backend/`):
+
+```bash
+alembic upgrade head
+```
+
 Health check:
 - `GET http://localhost:8000/health`
 
@@ -168,7 +174,15 @@ Useful optional args:
 | Method | Endpoint | Description |
 |---|---|---|
 | POST | `/predict/full` | Unified readmission risk prediction with SHAP top factors |
-| POST | `/predict/risk` | Backward-compatible lightweight risk score endpoint |
+
+### Predictions Audit Trail
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/predictions/recent` | Last 20 persisted predictions including outcome fields |
+| POST | `/predictions/{id}/outcome` | Record actual 30-day outcome and clinician acknowledgement |
+
+`/predict/full` now persists every prediction row to PostgreSQL.
 
 ## 6) `/predict/full` Request/Response
 
@@ -219,3 +233,16 @@ Useful optional args:
 - SHAP explainability for `/predict/full` requires `shap==0.45.0` (included in backend requirements).
 - If model artifact files are missing, prediction endpoints return actionable error messages instructing to train first.
 - `model_report.md` contains the latest generated model comparison report.
+
+## 8) Docker Compose
+
+Run full stack (PostgreSQL + FastAPI + Next.js):
+
+```bash
+docker compose up --build
+```
+
+Services:
+- Frontend: `http://localhost:3000`
+- Backend API: `http://localhost:8000`
+- Postgres: `localhost:5432`

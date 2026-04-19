@@ -49,6 +49,10 @@ Thumbs.db
 *.sqlite3
 *.db
 
+# Docker / Compose local overrides
+docker-compose.override.yml
+docker-compose.local.yml
+
 # Trained model artifacts
 models/
 data/

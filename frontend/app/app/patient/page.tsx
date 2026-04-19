@@ -1,12 +1,13 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import ErrorBanner from "@/components/ErrorBanner";
 import LoadingSpinner from "@/components/LoadingSpinner";
 import RiskBanner from "@/components/RiskBanner";
-import { postJSON } from "@/lib/api";
+import { fetchAPI, postJSON } from "@/lib/api";
+import type { RecentPredictionsResponse, StoredPrediction } from "@/lib/types";
 
 type TopRiskFactor = {
   feature: string;
@@ -77,10 +78,28 @@ const initialForm: PatientFormState = {
 
 export default function ClinicalPatientPage() {
   const [form, setForm] = useState<PatientFormState>(initialForm);
+  const queryClient = useQueryClient();
 
   const predictionMutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) =>
       postJSON<FullPredictionResponse, Record<string, unknown>>("/predict/full", payload),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["predictions-recent"] });
+    },
+  });
+
+  const recentPredictionsQuery = useQuery({
+    queryKey: ["predictions-recent"],
+    queryFn: () => fetchAPI<RecentPredictionsResponse>("/predictions/recent"),
+    refetchInterval: 30_000,
+  });
+
+  const outcomeMutation = useMutation({
+    mutationFn: ({ id, outcome_30d }: { id: string; outcome_30d: boolean }) =>
+      postJSON<StoredPrediction, { outcome_30d: boolean }>(`/predictions/${id}/outcome`, { outcome_30d }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["predictions-recent"] });
+    },
   });
 
   const updateField = <K extends keyof PatientFormState>(key: K, value: PatientFormState[K]) => {
@@ -178,6 +197,34 @@ export default function ClinicalPatientPage() {
     );
     return clusterInfo?.size ?? 0;
   }, [patientCluster, predictionMutation.data?.cluster_centers]);
+
+  const todaysPredictions = useMemo(() => {
+    const rows = recentPredictionsQuery.data?.predictions ?? [];
+    const now = new Date();
+
+    return rows.filter((row) => {
+      if (!row.created_at) {
+        return false;
+      }
+      const created = new Date(row.created_at);
+      return (
+        created.getFullYear() === now.getFullYear() &&
+        created.getMonth() === now.getMonth() &&
+        created.getDate() === now.getDate()
+      );
+    });
+  }, [recentPredictionsQuery.data?.predictions]);
+
+  const formatDateTime = (iso: string | null): string => {
+    if (!iso) {
+      return "--";
+    }
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) {
+      return "--";
+    }
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  };
 
   return (
     <section className="space-y-7">
@@ -474,6 +521,68 @@ export default function ClinicalPatientPage() {
           </p>
         </section>
       ) : null}
+
+      <section className="space-y-4 rounded-2xl border border-emerald-200 bg-white p-6 shadow-sm">
+        <header className="space-y-1">
+          <h3 className="text-lg font-semibold text-emerald-950">Today&apos;s Predictions</h3>
+          <p className="text-sm text-slate-600">Most recent predictions recorded today with clinician outcome actions.</p>
+        </header>
+
+        {recentPredictionsQuery.isLoading ? <LoadingSpinner label="Loading recent predictions" /> : null}
+        {recentPredictionsQuery.error ? (
+          <ErrorBanner
+            message={recentPredictionsQuery.error instanceof Error ? recentPredictionsQuery.error.message : "Failed to load recent predictions."}
+          />
+        ) : null}
+
+        {!recentPredictionsQuery.isLoading && !recentPredictionsQuery.error ? (
+          todaysPredictions.length ? (
+            <div className="overflow-x-auto rounded-xl border border-slate-200">
+              <table className="min-w-full border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-[0.12em] text-slate-500">
+                    <th className="px-3 py-2">Time</th>
+                    <th className="px-3 py-2">Patient Ref</th>
+                    <th className="px-3 py-2">Risk</th>
+                    <th className="px-3 py-2">Score</th>
+                    <th className="px-3 py-2">RF Conf.</th>
+                    <th className="px-3 py-2">Outcome</th>
+                    <th className="px-3 py-2">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {todaysPredictions.map((row) => (
+                    <tr key={row.id} className="border-b border-slate-100">
+                      <td className="px-3 py-2 text-slate-700">{formatDateTime(row.created_at)}</td>
+                      <td className="px-3 py-2 font-medium text-slate-800">{row.patient_ref}</td>
+                      <td className="px-3 py-2 text-slate-700">{row.risk_level}</td>
+                      <td className="px-3 py-2 text-slate-700">{row.risk_score.toFixed(3)}</td>
+                      <td className="px-3 py-2 text-slate-700">{row.rf_confidence.toFixed(3)}</td>
+                      <td className="px-3 py-2 text-slate-700">
+                        {row.outcome_30d === null ? "Pending" : row.outcome_30d ? "Readmitted" : "Not Readmitted"}
+                      </td>
+                      <td className="px-3 py-2">
+                        <button
+                          type="button"
+                          onClick={() => outcomeMutation.mutate({ id: row.id, outcome_30d: true })}
+                          disabled={row.outcome_30d === true || outcomeMutation.isPending}
+                          className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.08em] text-rose-800 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {row.outcome_30d === true ? "Readmitted" : "Mark as Readmitted"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+              No predictions recorded yet for today.
+            </p>
+          )
+        ) : null}
+      </section>
     </section>
   );
 }

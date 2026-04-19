@@ -6,16 +6,21 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import joblib
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter
+from fastapi import Depends
 from fastapi import HTTPException
 from pydantic import BaseModel
 from pydantic import Field
 from sklearn.preprocessing import LabelEncoder
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.db import get_async_session
+from api.predictions_repo import insert_prediction
 from ml.data_utils import coerce_numeric_columns
 from ml.data_utils import default_csv_path
 from ml.data_utils import impute_missing_values
@@ -306,6 +311,7 @@ def build_feature_vector(request_data: dict[str, Any]) -> tuple[np.ndarray, pd.D
 
 
 class FullPredictionRequest(BaseModel):
+	patient_ref: str | None = None
 	age: int = Field(..., ge=0, le=120)
 	gender: str = "Female"
 	race: str = "Caucasian"
@@ -1031,7 +1037,10 @@ def _predict_full_internal(request: FullPredictionRequest, artifacts: TabularArt
 
 
 @router.post("/full")
-def predict_full(request: FullPredictionRequest) -> dict[str, Any]:
+async def predict_full(
+	request: FullPredictionRequest,
+	session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
 	try:
 		artifacts = _load_tabular_artifacts()
 	except HTTPException as exc:
@@ -1044,10 +1053,34 @@ def predict_full(request: FullPredictionRequest) -> dict[str, Any]:
 		raise HTTPException(status_code=503, detail=f"Model unavailable: {str(exc)}") from exc
 
 	try:
-		return _predict_full_internal(request, artifacts)
+		result = _predict_full_internal(request, artifacts)
 	except HTTPException as exc:
 		raise exc
 	except ValueError as exc:
 		raise HTTPException(status_code=400, detail=str(exc)) from exc
 	except Exception as exc:
 		raise HTTPException(status_code=500, detail=f"/predict/full inference failed: {exc}") from exc
+
+	try:
+		patient_ref = request.patient_ref.strip() if request.patient_ref else f"anon-{uuid4().hex[:12]}"
+		risk_level = str(result.get("risk_level", "LOW"))
+		risk_score = float(result.get("readmission_risk_30day", 0.0))
+		rf_confidence = float(result.get("rf_confidence", 0.0))
+		raw_factors = result.get("top_risk_factors", [])
+		top_factors = raw_factors if isinstance(raw_factors, list) else []
+
+		persisted = await insert_prediction(
+			session,
+			patient_ref=patient_ref,
+			risk_level=risk_level,
+			risk_score=risk_score,
+			rf_confidence=rf_confidence,
+			top_factors=top_factors,
+		)
+		result["prediction_id"] = str(persisted.id)
+		result["patient_ref"] = persisted.patient_ref
+	except Exception as exc:
+		logger.exception("Failed to persist prediction row")
+		raise HTTPException(status_code=500, detail=f"Prediction persistence failed: {exc}") from exc
+
+	return result

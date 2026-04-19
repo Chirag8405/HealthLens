@@ -261,3 +261,24 @@ export interface RiskPredictionResponse {
   sepsis_risk_note?: string;
   [key: string]: unknown;
 }
+
+export interface StoredPrediction {
+  id: string;
+  created_at: string | null;
+  patient_ref: string;
+  risk_level: "LOW" | "MEDIUM" | "HIGH" | string;
+  risk_score: number;
+  rf_confidence: number;
+  top_factors: Array<{
+    feature: string;
+    value: number;
+    impact: number;
+  }>;
+  outcome_30d: boolean | null;
+  clinician_ack: boolean;
+  ack_at: string | null;
+}
+
+export interface RecentPredictionsResponse {
+  predictions: StoredPrediction[];
+}
